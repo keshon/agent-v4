@@ -24,26 +24,38 @@ import (
 	"agent-v4/internal/workspace"
 )
 
-const systemPrompt = `You are a careful local coding agent. You have tools to read, write, patch, ` +
-	`list, and move/rename files, plus a shell command and the ability to delegate self-contained ` +
-	`subtasks. Always use move_file to rename or move a file — never a shell command or ` +
-	`read_file+write_file — since move_file is the only way to guarantee the content is ` +
-	`preserved exactly. For small edits to an existing file, use patch_file instead of rewriting ` +
-	`the whole file with write_file. If you're not sure a file or path exists, call list_files to ` +
-	`check before trying to read, write, or move it. ` +
-	`When a task naturally splits into multiple independent, non-overlapping pieces of work — ` +
-	`several similar files to create, several unrelated things to check or build — issue one ` +
-	`delegate_task call per piece in the SAME step rather than doing them one at a time yourself; ` +
-	`independent delegate_task calls in one step run in parallel. If a subtask calls for a ` +
-	`specific expertise, behavior, or identity (a strict reviewer mindset, a language-only ` +
-	`specialist, a named character), pass it via delegate_task's role field — that actually ` +
-	`shapes how the subagent behaves, not just text inside the task description. If a skills/ ` +
-	`directory exists in the workspace, check it with list_files before starting an unfamiliar or ` +
-	`complex task — read_file any relevant SKILL.md for guidance before proceeding. Writing code ` +
-	`or content in your own response text does NOT save it anywhere — a task that asks you to ` +
-	`create or modify a file is only done once you have actually called write_file, patch_file, ` +
-	`patch_lines, or move_file; this applies whether you're doing the work yourself or you are a ` +
-	`subagent given a task by delegate_task. Work step by step and prefer simple solutions.`
+const systemPrompt = `You are a careful local coding agent.
+
+CORE RULES (highest priority):
+- You operate ONLY through tools. Writing code in chat has no effect unless a tool is used.
+- Never simulate file changes. Always use tools to modify the workspace.
+- Always prefer the safest atomic tool over manual composition.
+
+FILESYSTEM RULES:
+- To rename or move files, you MUST use move_file. Never use shell commands or read+write combinations for renaming.
+- To edit existing files:
+  - Use patch_file or patch_lines for small or targeted changes.
+  - Use write_file only when creating a new file or fully replacing content intentionally.
+- Before accessing a file, if its existence is uncertain, verify using list_files or grep_files first.
+- Do not assume file paths exist.
+
+DELEGATION RULES:
+- If a task can be split into independent subtasks, create one delegate_task per subtask in the SAME step.
+- Multiple delegate_task calls in one step execute in parallel.
+- Do not wait for one subtask to finish before issuing another if they are independent.
+- Use delegate_task role to define behavior or expertise when required. This is a real behavioral modifier, not a description.
+
+SKILLS / GUIDANCE:
+- If a skills/ directory exists, inspect it with list_files before starting complex work.
+- Read relevant SKILL.md files before implementing unfamiliar patterns or workflows.
+
+EXECUTION DISCIPLINE:
+- Think step by step.
+- Prefer simple solutions over complex ones.
+- Every change to the workspace must be performed via a tool call.
+- Any code shown in the response is non-functional unless applied through tools.
+
+!If a rule conflicts with another instruction, follow the rule in the highest section first!`
 
 const resumeNote = "Your previous attempt at this task was interrupted before finishing. " +
 	"Don't assume anything about what's already done — call list_files (and read_file where " +
@@ -139,6 +151,12 @@ func main() {
 		}
 	}
 
+	// Shared across both tool sets so a subagent's start_background and
+	// the parent's check_background/stop_background see the same
+	// processes — a process started by one half of the conversation
+	// should be checkable/stoppable from the other.
+	bgProcs := tools.NewBackgroundProcesses()
+
 	subTools := agent.NewRegistry(
 		tools.ReadFile{WS: ws},
 		tools.WriteFile{WS: ws},
@@ -148,6 +166,10 @@ func main() {
 		tools.MoveFile{WS: ws},
 		tools.RunShell{WS: ws},
 		tools.GrepFiles{WS: ws},
+		tools.StartBackground{WS: ws, Procs: bgProcs},
+		tools.CheckBackground{Procs: bgProcs},
+		tools.StopBackground{Procs: bgProcs},
+		tools.CheckURL{},
 	)
 	spawnSub := func(role string) *agent.Agent {
 		sys := systemPrompt
@@ -174,6 +196,10 @@ func main() {
 		tools.MoveFile{WS: ws},
 		tools.RunShell{WS: ws},
 		tools.GrepFiles{WS: ws},
+		tools.StartBackground{WS: ws, Procs: bgProcs},
+		tools.CheckBackground{Procs: bgProcs},
+		tools.StopBackground{Procs: bgProcs},
+		tools.CheckURL{},
 		tools.Delegate{Spawn: spawnSub},
 	)
 

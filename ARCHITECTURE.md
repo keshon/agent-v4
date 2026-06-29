@@ -234,3 +234,31 @@ today. If a seventh cross-cutting concern gets added the same way, that's
 the signal to bundle these into a small `runState` struct instead of
 adding local #7 — not before, since premature structure here is exactly
 the kind of layer this project keeps deciding against elsewhere.
+
+## Long-running processes need a different tool, not a bigger timeout
+
+`run_shell` waits for the command to exit. That's correct for `go build`,
+wrong for `npm run dev` — a server is supposed to keep running, so
+run_shell will always time out and kill it before anything useful can
+happen. No prompt fixes "the only tool blocks until exit"; this needed an
+actual new capability: `start_background` (non-blocking) +
+`check_background` (read status/output later) + `stop_background` +
+`check_url` (a real Go `net/http` request — not curl/Invoke-WebRequest,
+same cross-platform reasoning as `move_file` vs `ren`/`mv`).
+
+**Real bug found building this, not hypothetical:** `sh -c "npm run dev"`
+forks `npm`/`node` as a child instead of exec-replacing itself. Killing
+just the wrapper PID (`cmd.Process.Kill()`) leaves the real server process
+orphaned and still holding the port — and worse, that orphan keeps the
+output pipe open, which makes `cmd.Wait()` hang forever waiting for an EOF
+that will never come. Fixed with OS-specific process-group kill
+(`procgroup_unix.go`: `Setpgid` + `syscall.Kill(-pid, ...)`;
+`procgroup_windows.go`: `taskkill /T /F`) — `stop_background` kills the
+whole subtree, not just the immediate child. Covered by a regression test
+that reproduces the fork-not-exec shape specifically, not just "kill a
+plain sleep."
+
+The `dev-server` skill carries the workflow these tools enable (start →
+wait → check_url → diagnose from check_background's real output if it
+fails) — the tools alone don't teach the sequence, same reasoning as
+every other skill file here.
