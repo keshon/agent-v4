@@ -1,0 +1,59 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"agent-v4/internal/agent"
+)
+
+// Delegate lets an agent hand off a self-contained subtask to a fresh
+// subagent and get back its final answer. This is the entire
+// "orchestrator" from agent-v3, replaced by one tool: delegation doesn't
+// need its own architecture, just a tool that recursively builds and runs
+// another *agent.Agent.
+type Delegate struct {
+	// Spawn builds a fresh subagent for one subtask. role, if non-empty,
+	// is layered onto the subagent's base system prompt rather than
+	// replacing it — the caller still gets the baseline tool-usage rules
+	// (move_file, list_files-before-acting, etc); the subagent just also
+	// adopts a specific expertise, behavior, or identity for this task.
+	// Spawn typically shares the same Client and Workspace but a smaller,
+	// task-specific tool set — in particular, without Delegate itself, so
+	// a task can't recurse into subagents forever.
+	Spawn func(role string) *agent.Agent
+}
+
+func (Delegate) Name() string { return "delegate_task" }
+func (Delegate) Description() string {
+	return "Delegate a self-contained subtask to a fresh subagent and return its final result. " +
+		"Use this for work that can be fully described in one instruction and doesn't need the " +
+		"current conversation's context. Optionally set role to specialize the subagent for this " +
+		"task — an expertise, a behavior pattern, a strict constraint, or a character/identity " +
+		"(e.g. 'a strict security reviewer who rejects anything unvalidated', 'a Python-only " +
+		"specialist', or 'Alice, a software engineer who loves tea'). This actually shapes how " +
+		"the subagent behaves, not just text embedded in the task description."
+}
+func (Delegate) Schema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"task": {"type": "string"},
+			"role": {"type": "string"}
+		},
+		"required": ["task"]
+	}`)
+}
+
+func (d Delegate) Run(ctx context.Context, args json.RawMessage) (string, error) {
+	var in struct {
+		Task string `json:"task"`
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil {
+		return "", fmt.Errorf("bad arguments: %w", err)
+	}
+	sub := d.Spawn(in.Role)
+	return sub.Run(ctx, in.Task)
+}

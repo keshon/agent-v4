@@ -1,0 +1,595 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"agent-v4/internal/llm"
+)
+
+// stubClient returns canned responses in sequence, one per Chat call.
+type stubClient struct {
+	responses   []llm.ChatResponse
+	calls       int
+	lastHistory []llm.Message
+}
+
+func (s *stubClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	s.lastHistory = req.Messages
+	resp := s.responses[s.calls]
+	s.calls++
+	return resp, nil
+}
+
+func TestAgent_VerifyOnFinish_AddsOneRoundTrip(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "looks done"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "confirmed correct"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys"})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("calls = %d, want 2 (initial answer + verify pass)", client.calls)
+	}
+	if out != "confirmed correct" {
+		t.Fatalf("result = %q, want %q", out, "confirmed correct")
+	}
+}
+
+func TestAgent_SkipVerify_ReturnsImmediately(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys", SkipVerify: true})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.calls != 1 {
+		t.Fatalf("calls = %d, want 1", client.calls)
+	}
+	if out != "done" {
+		t.Fatalf("result = %q, want %q", out, "done")
+	}
+}
+
+func TestAgent_VerifyOnFinish_OnlyHappensOnce(t *testing.T) {
+	// Even if the model keeps stalling with empty tool-call responses
+	// after the verify nudge, we must not loop forever asking it to verify
+	// again and again — verifiedOnce should gate this to a single pass.
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "looks done"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "still looks done"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys"})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("calls = %d, want exactly 2", client.calls)
+	}
+	if out != "still looks done" {
+		t.Fatalf("result = %q, want %q", out, "still looks done")
+	}
+}
+
+func TestAgent_RepeatedIdenticalCall_TriggersNudgeEvenWithoutErrors(t *testing.T) {
+	// Reproduces the real failure: list_files(".") called identically many
+	// times, every call succeeding (no error) — which "did it error or
+	// not" alone treats as fine. After MaxStuckSteps identical repeats, a
+	// repeat-specific nudge must land in the conversation.
+	listArgs := json.RawMessage(`{"path": "."}`)
+	client := &repeatingClient{
+		toolCall:     llm.ToolCall{ID: "c", Name: "echo", Arguments: listArgs},
+		maxRepeats:   5, // keep repeating for this many requests, then finish
+		finalContent: "done",
+	}
+	a := New(Config{
+		Client:        client,
+		Tools:         NewRegistry(echoToolStub{}),
+		System:        "sys",
+		MaxStuckSteps: 2,
+		SkipVerify:    true,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	nudges := 0
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "exact same") {
+			nudges++
+		}
+	}
+	if nudges == 0 {
+		t.Fatal("expected at least one repeat-specific nudge in history, got none")
+	}
+}
+
+func TestAgent_DistinctSuccessfulCalls_NeverNudged(t *testing.T) {
+	// Control case: genuinely different successful calls each step must
+	// never be mistaken for a stuck loop.
+	client := &varyingArgsClient{steps: 5, finalContent: "done"}
+	a := New(Config{
+		Client:        client,
+		Tools:         NewRegistry(echoToolStub{}),
+		System:        "sys",
+		MaxStuckSteps: 2,
+		SkipVerify:    true,
+	})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "done" {
+		t.Fatalf("result = %q, want %q", out, "done")
+	}
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "Stop repeating") {
+			t.Fatalf("unexpected nudge for genuinely distinct calls: %q", m.Content)
+		}
+	}
+}
+
+// echoToolStub is a no-op tool that always succeeds — stands in for
+// list_files's "never errors, just returns the same thing" behavior.
+type echoToolStub struct{ name string }
+
+func (e echoToolStub) Name() string {
+	if e.name == "" {
+		return "echo"
+	}
+	return e.name
+}
+func (echoToolStub) Description() string     { return "echo" }
+func (echoToolStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
+func (echoToolStub) Run(context.Context, json.RawMessage) (string, error) {
+	return "ok", nil
+}
+
+// repeatingClient returns the same tool call for a fixed number of
+// requests, then a final no-tool-call answer. It records the history it
+// was given on its last call so the test can inspect what got nudged in.
+type repeatingClient struct {
+	toolCall     llm.ToolCall
+	maxRepeats   int
+	finalContent string
+	calls        int
+	lastHistory  []llm.Message
+}
+
+func (c *repeatingClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.lastHistory = req.Messages
+	c.calls++
+	if c.calls > c.maxRepeats {
+		return llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: c.finalContent}}, nil
+	}
+	return llm.ChatResponse{Message: llm.Message{
+		Role:      llm.RoleAssistant,
+		ToolCalls: []llm.ToolCall{c.toolCall},
+	}}, nil
+}
+
+// varyingArgsClient issues a different tool call (different args) on
+// every step, then finishes — confirms distinct calls are never flagged
+// as a repeat.
+type varyingArgsClient struct {
+	steps        int
+	finalContent string
+	calls        int
+	lastHistory  []llm.Message
+}
+
+func (c *varyingArgsClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.lastHistory = req.Messages
+	c.calls++
+	if c.calls > c.steps {
+		return llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: c.finalContent}}, nil
+	}
+	args, _ := json.Marshal(map[string]int{"n": c.calls})
+	return llm.ChatResponse{Message: llm.Message{
+		Role:      llm.RoleAssistant,
+		ToolCalls: []llm.ToolCall{{ID: "c", Name: "echo", Arguments: args}},
+	}}, nil
+}
+
+func TestAgent_BudgetWarning_FiresOncePerThreshold(t *testing.T) {
+	// Usage climbs past 75% then 90% of a 1000-token ContextLimit across
+	// three steps, then stays high. Each threshold should produce exactly
+	// one nudge, not one per step once crossed.
+	client := &usageClient{
+		usages:       []int{600, 800, 950, 960},
+		finalContent: "done",
+	}
+	a := New(Config{
+		Client:       client,
+		Tools:        NewRegistry(echoToolStub{}),
+		System:       "sys",
+		ContextLimit: 1000,
+		SkipVerify:   true,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	notices, warnings := 0, 0
+	for _, m := range client.lastHistory {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		if strings.Contains(m.Content, "Context budget notice") {
+			notices++
+		}
+		if strings.Contains(m.Content, "Context budget warning") {
+			warnings++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("75%% notice fired %d times, want exactly 1", notices)
+	}
+	if warnings != 1 {
+		t.Fatalf("90%% warning fired %d times, want exactly 1", warnings)
+	}
+}
+
+func TestAgent_BudgetWarning_DisabledByDefault(t *testing.T) {
+	client := &usageClient{usages: []int{999999}, finalContent: "done"}
+	a := New(Config{
+		Client:     client,
+		Tools:      NewRegistry(echoToolStub{}),
+		System:     "sys",
+		SkipVerify: true, // ContextLimit left at zero: tracking disabled
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, m := range client.lastHistory {
+		if strings.Contains(m.Content, "Context budget") {
+			t.Fatalf("unexpected budget nudge with ContextLimit unset: %q", m.Content)
+		}
+	}
+}
+
+func TestAgent_ParallelToolCalls_PreserveOrderRegardlessOfFinishTime(t *testing.T) {
+	// Two calls in one step; the FIRST one issued sleeps longer than the
+	// second. If execution were sequential, the whole step would take at
+	// least the sum of both delays; if parallel, roughly the max of them.
+	slow := slowToolStub{name: "slow_a", delay: 40 * time.Millisecond}
+	fast := slowToolStub{name: "slow_b", delay: 5 * time.Millisecond}
+
+	client := &twoCallClient{
+		callA:        llm.ToolCall{ID: "call_a", Name: "slow_a", Arguments: json.RawMessage(`{}`)},
+		callB:        llm.ToolCall{ID: "call_b", Name: "slow_b", Arguments: json.RawMessage(`{}`)},
+		finalContent: "done",
+	}
+	a := New(Config{
+		Client:     client,
+		Tools:      NewRegistry(slow, fast),
+		System:     "sys",
+		SkipVerify: true,
+	})
+
+	start := time.Now()
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed >= slow.delay+fast.delay {
+		t.Fatalf("took %v, expected well under the sum of delays (%v) if calls ran in parallel",
+			elapsed, slow.delay+fast.delay)
+	}
+
+	// Order in history must match call order (call_a's result before
+	// call_b's), even though call_b's tool finishes first.
+	var order []string
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleTool {
+			order = append(order, m.ToolCallID)
+		}
+	}
+	if len(order) != 2 || order[0] != "call_a" || order[1] != "call_b" {
+		t.Fatalf("tool result order = %v, want [call_a call_b]", order)
+	}
+}
+
+// usageClient returns escalating Usage.PromptTokens values, one per call,
+// then a final no-tool-call answer once the list is exhausted.
+type usageClient struct {
+	usages       []int
+	finalContent string
+	calls        int
+	lastHistory  []llm.Message
+}
+
+func (c *usageClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.lastHistory = req.Messages
+	if c.calls >= len(c.usages) {
+		return llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: c.finalContent}}, nil
+	}
+	usage := c.usages[c.calls]
+	c.calls++
+	args, _ := json.Marshal(map[string]int{"n": c.calls})
+	return llm.ChatResponse{
+		Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c", Name: "echo", Arguments: args}}},
+		Usage:   llm.Usage{PromptTokens: usage},
+	}, nil
+}
+
+// slowToolStub sleeps for delay then succeeds — used to prove concurrent
+// execution of multiple tool calls within one step.
+type slowToolStub struct {
+	name  string
+	delay time.Duration
+}
+
+func (s slowToolStub) Name() string            { return s.name }
+func (s slowToolStub) Description() string     { return "slow" }
+func (s slowToolStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
+func (s slowToolStub) Run(_ context.Context, _ json.RawMessage) (string, error) {
+	time.Sleep(s.delay)
+	return "ok", nil
+}
+
+// twoCallClient issues exactly two tool calls in its first response, then
+// finishes on the second call.
+type twoCallClient struct {
+	callA, callB llm.ToolCall
+	finalContent string
+	calls        int
+	lastHistory  []llm.Message
+	mu           sync.Mutex
+}
+
+func (c *twoCallClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastHistory = req.Messages
+	c.calls++
+	if c.calls == 1 {
+		return llm.ChatResponse{Message: llm.Message{
+			Role:      llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{c.callA, c.callB},
+		}}, nil
+	}
+	return llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: c.finalContent}}, nil
+}
+
+func TestAgent_StateFile_SavedAndLoadable(t *testing.T) {
+	dir := t.TempDir()
+	statePath := dir + "/state.json"
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}},
+	}}
+	a := New(Config{
+		Client:     client,
+		Tools:      NewRegistry(),
+		System:     "sys",
+		SkipVerify: true,
+		StateFile:  statePath,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	history, err := LoadState(statePath)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(history) == 0 {
+		t.Fatal("loaded history is empty")
+	}
+	if history[len(history)-1].Content != "done" {
+		t.Fatalf("last message content = %q, want %q", history[len(history)-1].Content, "done")
+	}
+}
+
+func TestAgent_Resume_ContinuesFromLoadedHistory(t *testing.T) {
+	saved := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "original task"},
+		{Role: llm.RoleAssistant, Content: "partial progress"},
+	}
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "finished now"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys", SkipVerify: true})
+
+	out, err := a.Resume(context.Background(), saved, "continue please")
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if out != "finished now" {
+		t.Fatalf("result = %q, want %q", out, "finished now")
+	}
+
+	found := false
+	for _, m := range client.lastHistory {
+		if m.Content == "continue please" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("resume note not found in sent history")
+	}
+	if client.lastHistory[1].Content != "original task" {
+		t.Fatal("original task message lost on resume")
+	}
+}
+
+func TestEffectiveMaxTokens_CapsAgainstRemainingRoom(t *testing.T) {
+	a := New(Config{
+		Client:       &stubClient{},
+		Tools:        NewRegistry(),
+		ContextLimit: 32768,
+		MaxTokens:    32768,
+	})
+	// prompt already used 30000 of 32768 — only ~2512 actually free.
+	got := a.effectiveMaxTokens(30000)
+	if got >= 32768 {
+		t.Fatalf("effectiveMaxTokens = %d, want it capped well below MaxTokens", got)
+	}
+	if got < 256 {
+		t.Fatalf("effectiveMaxTokens = %d, want at least the floor of 256", got)
+	}
+}
+
+func TestEffectiveMaxTokens_NoLimitKnown_FallsBackToConfig(t *testing.T) {
+	a := New(Config{Client: &stubClient{}, Tools: NewRegistry(), MaxTokens: 4096})
+	if got := a.effectiveMaxTokens(30000); got != 4096 {
+		t.Fatalf("effectiveMaxTokens = %d, want 4096 (ContextLimit unset)", got)
+	}
+}
+
+func TestEffectiveMaxTokens_FirstCall_StillCapsAgainstContext(t *testing.T) {
+	// ContextLimit known but no prompt measured yet (first call) — must
+	// not blindly return the full ceiling if the ceiling is close to or
+	// equal to the context size, since the unmeasured prompt isn't zero.
+	a := New(Config{
+		Client:       &stubClient{},
+		Tools:        NewRegistry(),
+		ContextLimit: 32768,
+		MaxTokens:    32768,
+	})
+	got := a.effectiveMaxTokens(0)
+	if got >= 32768 {
+		t.Fatalf("effectiveMaxTokens = %d, want it capped below the full ceiling on an unmeasured first call", got)
+	}
+}
+
+func TestAgent_LeakedToolCallText_IsNotTrustedAsFinish(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant,
+			Content: "Here's the file.\n<|tool_call>call:write_file{path: \"x.txt\"}<tool_call|>"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done for real"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys", SkipVerify: true})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "done for real" {
+		t.Fatalf("result = %q, want %q", out, "done for real")
+	}
+
+	found := false
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "looks like an attempted tool call") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a corrective nudge about the leaked tool-call text")
+	}
+}
+
+func TestAgent_VerifyMessage_StatesZeroWritesAsFact(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "I created the file."}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "confirmed"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys"}) // SkipVerify left false
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	found := false
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "Concrete fact: 0 file-writing") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected the verify message to state the zero-writes fact when no mutating tool ran")
+	}
+}
+
+func TestAgent_VerifyMessage_OmitsFactWhenAWriteSucceeded(t *testing.T) {
+	args, _ := json.Marshal(map[string]string{"path": "x.txt", "content": "hi"})
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{ID: "c", Name: "write_file", Arguments: args}}}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "I created the file."}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "confirmed"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(echoToolStub{name: "write_file"}), System: "sys"})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, m := range client.lastHistory {
+		if strings.Contains(m.Content, "Concrete fact: 0 file-writing") {
+			t.Fatalf("unexpected zero-writes fact when write_file actually succeeded: %q", m.Content)
+		}
+	}
+}
+
+func TestAgent_VerifyHook_OutputFoldedIntoVerifyMessage(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done with the code change"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "confirmed"}},
+	}}
+	a := New(Config{
+		Client: client,
+		Tools:  NewRegistry(),
+		System: "sys",
+		Verify: func(ctx context.Context) (string, bool) {
+			return "FAILED: undefined symbol foo", true
+		},
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	found := false
+	for _, m := range client.lastHistory {
+		if strings.Contains(m.Content, "Build/test check result: FAILED: undefined symbol foo") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected Verify output to appear in the verify message")
+	}
+}
+
+func TestAgent_VerifyHook_SkippedWhenNotOK(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "confirmed"}},
+	}}
+	a := New(Config{
+		Client: client,
+		Tools:  NewRegistry(),
+		System: "sys",
+		Verify: func(ctx context.Context) (string, bool) { return "", false },
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, m := range client.lastHistory {
+		if strings.Contains(m.Content, "Build/test check") {
+			t.Fatalf("unexpected verify output when Verify reported ok=false: %q", m.Content)
+		}
+	}
+}
