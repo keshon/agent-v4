@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
 )
 
@@ -17,7 +18,8 @@ import (
 // risks getting cut off (see Config.MaxTokens).
 type PatchFile struct{ WS *workspace.Workspace }
 
-func (PatchFile) Name() string { return "patch_file" }
+func (PatchFile) Name() string         { return "patch_file" }
+func (PatchFile) Mode() agent.ToolMode { return agent.Exclusive }
 func (PatchFile) Description() string {
 	return "Replace one exact occurrence of old_content with new_content in an existing file. " +
 		"Use this for small edits instead of rewriting the whole file with write_file."

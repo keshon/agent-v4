@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
 )
 
@@ -27,6 +28,12 @@ type StartBackground struct {
 }
 
 func (StartBackground) Name() string { return "start_background" }
+
+// Mode is Concurrent: launching a process doesn't touch the workspace
+// filesystem, and BackgroundProcesses is mutex-protected, so starting
+// several background processes (e.g. backend + frontend dev servers) in
+// one step is safe and exactly the kind of thing worth parallelizing.
+func (StartBackground) Mode() agent.ToolMode { return agent.Concurrent }
 func (StartBackground) Description() string {
 	return "Start a long-running command (dev server, watcher, anything that doesn't exit on " +
 		"its own) without blocking. Returns an id to check on it with check_background or stop " +
@@ -71,7 +78,8 @@ func (t StartBackground) Run(_ context.Context, args json.RawMessage) (string, e
 
 type CheckBackground struct{ Procs *BackgroundProcesses }
 
-func (CheckBackground) Name() string { return "check_background" }
+func (CheckBackground) Name() string         { return "check_background" }
+func (CheckBackground) Mode() agent.ToolMode { return agent.Concurrent }
 func (CheckBackground) Description() string {
 	return "Check the current output and status (running/exited) of a process started with " +
 		"start_background."
@@ -107,8 +115,9 @@ func (t CheckBackground) Run(_ context.Context, args json.RawMessage) (string, e
 
 type StopBackground struct{ Procs *BackgroundProcesses }
 
-func (StopBackground) Name() string        { return "stop_background" }
-func (StopBackground) Description() string { return "Stop a process started with start_background." }
+func (StopBackground) Name() string         { return "stop_background" }
+func (StopBackground) Mode() agent.ToolMode { return agent.Concurrent }
+func (StopBackground) Description() string  { return "Stop a process started with start_background." }
 func (StopBackground) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",

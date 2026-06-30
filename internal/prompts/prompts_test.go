@@ -1,0 +1,50 @@
+package prompts
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestAllPromptsLoadNonEmpty(t *testing.T) {
+	all := map[string]string{
+		"System":            System,
+		"RoleAddendum":      RoleAddendum,
+		"Resume":            Resume,
+		"Verify":            Verify,
+		"VerifyZeroWrites":  VerifyZeroWrites,
+		"VerifyCheckResult": VerifyCheckResult,
+		"LeakDetected":      LeakDetected,
+		"LeakRepeated":      LeakRepeated,
+		"StuckFailing":      StuckFailing,
+		"StuckRepeating":    StuckRepeating,
+		"BudgetWarning":     BudgetWarning,
+		"BudgetNotice":      BudgetNotice,
+	}
+	for name, val := range all {
+		if val == "" {
+			t.Errorf("%s loaded empty", name)
+		}
+		if strings.HasSuffix(val, "\n") {
+			t.Errorf("%s has a trailing newline, want trimmed", name)
+		}
+	}
+}
+
+func TestWithRole_EmptyReturnsSystemUnchanged(t *testing.T) {
+	if got := WithRole(""); got != System {
+		t.Fatalf("WithRole(\"\") changed the prompt, want it unchanged")
+	}
+}
+
+func TestWithRole_NonEmptyAppendsFormattedAddendum(t *testing.T) {
+	got := WithRole("a strict reviewer")
+	if !strings.HasPrefix(got, System) {
+		t.Fatal("WithRole result must start with the base System prompt")
+	}
+	if !strings.Contains(got, "a strict reviewer") {
+		t.Fatalf("role text not found in result: %q", got)
+	}
+	if strings.Contains(got, "%s") {
+		t.Fatalf("role addendum format string was not substituted: %q", got)
+	}
+}

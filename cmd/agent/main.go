@@ -20,47 +20,10 @@ import (
 
 	"agent-v4/internal/agent"
 	"agent-v4/internal/llm"
+	"agent-v4/internal/prompts"
 	"agent-v4/internal/tools"
 	"agent-v4/internal/workspace"
 )
-
-const systemPrompt = `You are a careful local coding agent.
-
-CORE RULES (highest priority):
-- You operate ONLY through tools. Writing code in chat has no effect unless a tool is used.
-- Never simulate file changes. Always use tools to modify the workspace.
-- Always prefer the safest atomic tool over manual composition.
-
-FILESYSTEM RULES:
-- To rename or move files, you MUST use move_file. Never use shell commands or read+write combinations for renaming.
-- To edit existing files:
-  - Use patch_file or patch_lines for small or targeted changes.
-  - Use write_file only when creating a new file or fully replacing content intentionally.
-- Before accessing a file, if its existence is uncertain, verify using list_files or grep_files first.
-- Do not assume file paths exist.
-
-DELEGATION RULES:
-- If a task can be split into independent subtasks, create one delegate_task per subtask in the SAME step.
-- Multiple delegate_task calls in one step execute in parallel.
-- Do not wait for one subtask to finish before issuing another if they are independent.
-- Use delegate_task role to define behavior or expertise when required. This is a real behavioral modifier, not a description.
-
-SKILLS / GUIDANCE:
-- If a skills/ directory exists, inspect it with list_files before starting complex work.
-- Read relevant SKILL.md files before implementing unfamiliar patterns or workflows.
-
-EXECUTION DISCIPLINE:
-- Think step by step.
-- Prefer simple solutions over complex ones.
-- Every change to the workspace must be performed via a tool call.
-- Any code shown in the response is non-functional unless applied through tools.
-
-!If a rule conflicts with another instruction, follow the rule in the highest section first!`
-
-const resumeNote = "Your previous attempt at this task was interrupted before finishing. " +
-	"Don't assume anything about what's already done — call list_files (and read_file where " +
-	"needed) to check the actual current state of the workspace first, then continue and finish " +
-	"the task."
 
 func main() {
 	backend := flag.String("backend", "http://localhost:5001", "koboldcpp/llama.cpp base URL")
@@ -172,15 +135,10 @@ func main() {
 		tools.CheckURL{},
 	)
 	spawnSub := func(role string) *agent.Agent {
-		sys := systemPrompt
-		if role != "" {
-			sys += "\n\nFor this specific task, adopt this identity and let it consistently shape " +
-				"your tone, voice, and choices in anything you write or decide: " + role
-		}
 		return agent.New(agent.Config{
 			Client:       client,
 			Tools:        subTools,
-			System:       sys,
+			System:       prompts.WithRole(role),
 			MaxTokens:    *maxTokens,
 			ContextLimit: contextLimit,
 			Verify:       verify,
@@ -206,7 +164,7 @@ func main() {
 	a := agent.New(agent.Config{
 		Client:       client,
 		Tools:        mainTools,
-		System:       systemPrompt,
+		System:       prompts.System,
 		MaxTokens:    *maxTokens,
 		ContextLimit: contextLimit,
 		StateFile:    stateFile,
@@ -228,7 +186,7 @@ func main() {
 			log.Fatalf("resume: %v", err)
 		}
 		fmt.Printf("resuming from %s (%d messages)\n", *resume, len(history))
-		result, err = a.Resume(ctx, history, resumeNote)
+		result, err = a.Resume(ctx, history, prompts.Resume)
 		if err != nil {
 			log.Fatalf("agent failed: %v", err)
 		}

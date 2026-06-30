@@ -3,5 +3,4 @@ sandbox/
 temp/
 *.exe
 dump.txt
-agent-debug.log
 dump.bat

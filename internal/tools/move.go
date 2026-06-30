@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
 )
 
@@ -17,7 +18,8 @@ import (
 // real content.
 type MoveFile struct{ WS *workspace.Workspace }
 
-func (MoveFile) Name() string { return "move_file" }
+func (MoveFile) Name() string         { return "move_file" }
+func (MoveFile) Mode() agent.ToolMode { return agent.Exclusive }
 func (MoveFile) Description() string {
 	return "Rename or move a file within the workspace, preserving its contents exactly. " +
 		"Always use this for renames instead of a shell command or read_file+write_file."

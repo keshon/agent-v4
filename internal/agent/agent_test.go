@@ -155,6 +155,7 @@ func (e echoToolStub) Name() string {
 	return e.name
 }
 func (echoToolStub) Description() string     { return "echo" }
+func (echoToolStub) Mode() ToolMode          { return Concurrent }
 func (echoToolStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
 func (echoToolStub) Run(context.Context, json.RawMessage) (string, error) {
 	return "ok", nil
@@ -340,6 +341,7 @@ type slowToolStub struct {
 
 func (s slowToolStub) Name() string            { return s.name }
 func (s slowToolStub) Description() string     { return "slow" }
+func (s slowToolStub) Mode() ToolMode          { return Concurrent }
 func (s slowToolStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
 func (s slowToolStub) Run(_ context.Context, _ json.RawMessage) (string, error) {
 	time.Sleep(s.delay)
@@ -592,4 +594,214 @@ func TestAgent_VerifyHook_SkippedWhenNotOK(t *testing.T) {
 			t.Fatalf("unexpected verify output when Verify reported ok=false: %q", m.Content)
 		}
 	}
+}
+
+// orderTrackingExclusiveStub is Exclusive and records the order it ran in
+// relative to other instances sharing the same *[]string log — used to
+// prove Exclusive calls never overlap each other.
+type orderTrackingExclusiveStub struct {
+	name  string
+	delay time.Duration
+	log   *[]string
+	mu    *sync.Mutex
+}
+
+func (s orderTrackingExclusiveStub) Name() string            { return s.name }
+func (s orderTrackingExclusiveStub) Description() string     { return "exclusive" }
+func (s orderTrackingExclusiveStub) Mode() ToolMode          { return Exclusive }
+func (s orderTrackingExclusiveStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
+func (s orderTrackingExclusiveStub) Run(_ context.Context, _ json.RawMessage) (string, error) {
+	s.mu.Lock()
+	*s.log = append(*s.log, "start:"+s.name)
+	s.mu.Unlock()
+	time.Sleep(s.delay)
+	s.mu.Lock()
+	*s.log = append(*s.log, "end:"+s.name)
+	s.mu.Unlock()
+	return "ok", nil
+}
+
+func TestAgent_ExclusiveToolCalls_NeverOverlap(t *testing.T) {
+	var log []string
+	var mu sync.Mutex
+	a1 := orderTrackingExclusiveStub{name: "a", delay: 30 * time.Millisecond, log: &log, mu: &mu}
+	a2 := orderTrackingExclusiveStub{name: "b", delay: 30 * time.Millisecond, log: &log, mu: &mu}
+
+	args, _ := json.Marshal(map[string]any{})
+	client := &twoCallClient{
+		callA:        llm.ToolCall{ID: "1", Name: "a", Arguments: args},
+		callB:        llm.ToolCall{ID: "2", Name: "b", Arguments: args},
+		finalContent: "done",
+	}
+	a := New(Config{
+		Client:     client,
+		Tools:      NewRegistry(a1, a2),
+		System:     "sys",
+		SkipVerify: true,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// If they overlapped, we'd see start:a, start:b, end:a, end:b (or
+	// similar interleaving). Strictly sequential means each end comes
+	// immediately after its own start, with no other start in between.
+	if len(log) != 4 {
+		t.Fatalf("expected 4 log entries, got %d: %v", len(log), log)
+	}
+	if !((log[0] == "start:a" && log[1] == "end:a" && log[2] == "start:b" && log[3] == "end:b") ||
+		(log[0] == "start:b" && log[1] == "end:b" && log[2] == "start:a" && log[3] == "end:a")) {
+		t.Fatalf("exclusive calls overlapped, got order: %v", log)
+	}
+}
+
+func TestAgent_MixedConcurrentAndExclusive_ExclusiveRunsAfterConcurrentBatch(t *testing.T) {
+	var log []string
+	var mu sync.Mutex
+	concurrentTool := slowToolStub{name: "fast_read", delay: 10 * time.Millisecond}
+	exclusiveTool := orderTrackingExclusiveStub{name: "write", delay: 10 * time.Millisecond, log: &log, mu: &mu}
+
+	args, _ := json.Marshal(map[string]any{})
+	client := &twoCallClient{
+		callA:        llm.ToolCall{ID: "1", Name: "fast_read", Arguments: args},
+		callB:        llm.ToolCall{ID: "2", Name: "write", Arguments: args},
+		finalContent: "done",
+	}
+	a := New(Config{
+		Client:     client,
+		Tools:      NewRegistry(concurrentTool, exclusiveTool),
+		System:     "sys",
+		SkipVerify: true,
+	})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "done" {
+		t.Fatalf("result = %q, want %q", out, "done")
+	}
+	// The Exclusive tool must have actually run (both log entries present).
+	if len(log) != 2 || log[0] != "start:write" || log[1] != "end:write" {
+		t.Fatalf("expected exclusive tool to run cleanly, got log: %v", log)
+	}
+}
+
+func TestAgent_SearchFatigue_FiresOnceAfterManyExploratoryStepsWithoutMutation(t *testing.T) {
+	// Reproduces the real failure: many varying grep_files/list_files
+	// calls in a row, none of them errors, none of them exact repeats —
+	// so neither "progressed" nor exact-repeat detection ever fires —
+	// but also no mutating tool ever succeeds. The model is searching,
+	// not converging.
+	client := &exploringClient{steps: 10, finalContent: "done"}
+	a := New(Config{
+		Client:              client,
+		Tools:               NewRegistry(echoToolStub{name: "grep_files"}),
+		System:              "sys",
+		MaxExploratorySteps: 4,
+		SkipVerify:          true,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	fired := 0
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "spent several steps searching") {
+			fired++
+		}
+	}
+	if fired != 1 {
+		t.Fatalf("search fatigue nudge fired %d times, want exactly 1", fired)
+	}
+}
+
+func TestAgent_SearchFatigue_ResetsOnMutatingSuccess(t *testing.T) {
+	args, _ := json.Marshal(map[string]string{"path": "x.txt", "content": "hi"})
+	// 3 exploratory calls, then a successful write, then 3 more
+	// exploratory calls — should never hit the threshold of 4 since the
+	// write resets the counter partway through.
+	client := &mixedExploreWriteClient{
+		exploreBefore: 3,
+		exploreAfter:  3,
+		writeArgs:     args,
+		finalContent:  "done",
+	}
+	a := New(Config{
+		Client: client,
+		Tools: NewRegistry(
+			echoToolStub{name: "grep_files"},
+			echoToolStub{name: "write_file"},
+		),
+		System:              "sys",
+		MaxExploratorySteps: 4,
+		SkipVerify:          true,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, m := range client.lastHistory {
+		if strings.Contains(m.Content, "spent several steps searching") {
+			t.Fatalf("unexpected search fatigue nudge when a mutation reset the counter: %q", m.Content)
+		}
+	}
+}
+
+// exploringClient issues a grep_files call with varying arguments every
+// step (never an exact repeat, never an error) for `steps` steps, then
+// finishes — simulates a model searching without converging.
+type exploringClient struct {
+	steps        int
+	finalContent string
+	calls        int
+	lastHistory  []llm.Message
+}
+
+func (c *exploringClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.lastHistory = req.Messages
+	if c.calls >= c.steps {
+		return llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: c.finalContent}}, nil
+	}
+	c.calls++
+	args, _ := json.Marshal(map[string]int{"n": c.calls})
+	return llm.ChatResponse{Message: llm.Message{
+		Role:      llm.RoleAssistant,
+		ToolCalls: []llm.ToolCall{{ID: "c", Name: "grep_files", Arguments: args}},
+	}}, nil
+}
+
+// mixedExploreWriteClient issues exploreBefore varying grep calls, one
+// write_file call, then exploreAfter more varying grep calls, then
+// finishes.
+type mixedExploreWriteClient struct {
+	exploreBefore, exploreAfter int
+	writeArgs                   json.RawMessage
+	finalContent                string
+	calls                       int
+	lastHistory                 []llm.Message
+}
+
+func (c *mixedExploreWriteClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.lastHistory = req.Messages
+	total := c.exploreBefore + 1 + c.exploreAfter
+	if c.calls >= total {
+		return llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: c.finalContent}}, nil
+	}
+	i := c.calls
+	c.calls++
+	if i == c.exploreBefore {
+		return llm.ChatResponse{Message: llm.Message{
+			Role:      llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{ID: "w", Name: "write_file", Arguments: c.writeArgs}},
+		}}, nil
+	}
+	args, _ := json.Marshal(map[string]int{"n": i})
+	return llm.ChatResponse{Message: llm.Message{
+		Role:      llm.RoleAssistant,
+		ToolCalls: []llm.ToolCall{{ID: "c", Name: "grep_files", Arguments: args}},
+	}}, nil
 }

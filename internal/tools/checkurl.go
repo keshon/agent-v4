@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"agent-v4/internal/agent"
 )
 
 // CheckURL makes a real HTTP request instead of trusting a dev server's
@@ -15,7 +17,8 @@ import (
 // exactly the answer the model needs to see.
 type CheckURL struct{}
 
-func (CheckURL) Name() string { return "check_url" }
+func (CheckURL) Name() string         { return "check_url" }
+func (CheckURL) Mode() agent.ToolMode { return agent.Concurrent }
 func (CheckURL) Description() string {
 	return "Make an HTTP GET request to a URL and report the status code, or the connection " +
 		"error if it's not reachable. Use this to verify a server is actually up instead of " +

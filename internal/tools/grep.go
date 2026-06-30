@@ -4,12 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
 )
 
@@ -19,11 +22,13 @@ import (
 // differences the way shelling out to findstr/grep would be.
 type GrepFiles struct{ WS *workspace.Workspace }
 
-func (GrepFiles) Name() string { return "grep_files" }
+func (GrepFiles) Name() string         { return "grep_files" }
+func (GrepFiles) Mode() agent.ToolMode { return agent.Concurrent }
 func (GrepFiles) Description() string {
 	return "Search file contents under a path (recursive) for a regex pattern. Returns " +
-		"path:line:content for each match, capped at 200 matches. Use this instead of " +
-		"read_file-ing many files just to find where something is."
+		"path:line:content for each match, capped at 200 matches; long lines are truncated. " +
+		"Binary files (compiled executables, images, etc) are skipped automatically. Use this " +
+		"instead of read_file-ing many files just to find where something is."
 }
 func (GrepFiles) Schema() json.RawMessage {
 	return json.RawMessage(`{
@@ -37,7 +42,36 @@ func (GrepFiles) Schema() json.RawMessage {
 	}`)
 }
 
-const grepMaxMatches = 200
+const (
+	grepMaxMatches = 200
+	grepMaxLineLen = 500  // truncate pathologically long matched lines (minified JS, etc)
+	grepSniffBytes = 8000 // how much of a file to check for binary content before scanning
+)
+
+// looksBinary mirrors the heuristic git itself uses: if a null byte shows
+// up in the first chunk of a file, treat it as binary and skip it
+// entirely. Without this, grep_files will happily regex-scan a compiled
+// binary (it did, in practice: a wildcard pattern matched across a long
+// stretch of beacon.exe with no newlines, and raw non-UTF8 bytes —
+// including control characters — went straight into the conversation
+// history as a "match"). That's not just wasted context: it's exactly
+// the kind of corrupted history that can derail everything after it.
+func looksBinary(f *os.File) (bool, error) {
+	buf := make([]byte, grepSniffBytes)
+	n, err := f.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	if _, seekErr := f.Seek(0, 0); seekErr != nil {
+		return false, seekErr
+	}
+	for _, b := range buf[:n] {
+		if b == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 func (t GrepFiles) Run(_ context.Context, args json.RawMessage) (string, error) {
 	var in struct {
@@ -70,9 +104,13 @@ func (t GrepFiles) Run(_ context.Context, args json.RawMessage) (string, error) 
 		}
 		f, err := os.Open(p)
 		if err != nil {
-			return nil // unreadable file (binary, permissions) — skip, not fatal
+			return nil // unreadable file (permissions, etc) — skip, not fatal
 		}
 		defer f.Close()
+
+		if binary, err := looksBinary(f); err != nil || binary {
+			return nil
+		}
 
 		rel, _ := filepath.Rel(t.WS.Root(), p)
 		scanner := bufio.NewScanner(f)
@@ -82,6 +120,9 @@ func (t GrepFiles) Run(_ context.Context, args json.RawMessage) (string, error) 
 			lineNum++
 			line := scanner.Text()
 			if re.MatchString(line) {
+				if len(line) > grepMaxLineLen {
+					line = line[:grepMaxLineLen] + "...(truncated)"
+				}
 				fmt.Fprintf(&out, "%s:%d:%s\n", rel, lineNum, line)
 				matches++
 			}

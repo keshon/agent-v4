@@ -1,0 +1,1 @@
+Every tool call has failed for several steps in a row. Stop repeating the same approach: re-read the error messages above, reconsider your plan, and try a different tool or a different strategy.

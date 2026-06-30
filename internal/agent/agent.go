@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"agent-v4/internal/llm"
+	"agent-v4/internal/prompts"
 )
 
 // Config wires together everything an Agent needs. There is exactly one
@@ -44,6 +45,17 @@ type Config struct {
 	// "succeeds" by returning the same listing for the third time in a
 	// row is just as stuck as one that keeps erroring.
 	MaxStuckSteps int
+
+	// MaxExploratorySteps is how many consecutive steps with zero
+	// Exclusive (mutating) tool calls are tolerated before a one-time
+	// nudge suggests broadening the search instead of indefinitely
+	// narrowing the same dead-end query. Distinct from MaxStuckSteps:
+	// the model can be making "progress" by this loop's definition (new
+	// list_files/grep_files calls, no errors, no exact repeats) while
+	// still going nowhere — burning steps refining a search instead of
+	// converging on an answer. Zero means "use the default of 8"; to
+	// disable this nudge entirely, set it higher than MaxSteps.
+	MaxExploratorySteps int
 
 	// SkipVerify disables the self-check pass that normally runs once
 	// before Run returns: the model is asked to re-examine its own work
@@ -92,6 +104,9 @@ func New(cfg Config) *Agent {
 	}
 	if cfg.MaxStuckSteps == 0 {
 		cfg.MaxStuckSteps = 2
+	}
+	if cfg.MaxExploratorySteps == 0 {
+		cfg.MaxExploratorySteps = 8
 	}
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = 8192
@@ -159,6 +174,8 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 	warnedThreshold := 0
 	lastPromptTokens := 0
 	mutatingSucceeded := 0
+	exploratorySteps := 0
+	searchFatigueWarned := false
 
 	for step := 0; step < a.cfg.MaxSteps; step++ {
 		resp, err := a.cfg.Client.Chat(ctx, llm.ChatRequest{
@@ -187,18 +204,14 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			// before it's mistaken for a genuine finish.
 			if looksLikeLeakedToolCall(resp.Message.Content) {
 				history = append(history, llm.Message{
-					Role: llm.RoleUser,
-					Content: "Your last response contains text that looks like an attempted tool " +
-						"call (e.g. \"<|tool_call...\" or \"<tool_call>...\") instead of a real one " +
-						"— nothing was executed, nothing was saved. Make the actual tool call " +
-						"properly using function-calling, not text that merely looks like one.",
+					Role:    llm.RoleUser,
+					Content: prompts.LeakDetected,
 				})
 				stuckSteps++
 				if stuckSteps >= a.cfg.MaxStuckSteps {
 					history = append(history, llm.Message{
-						Role: llm.RoleUser,
-						Content: "This keeps happening. Respond with either a real function call " +
-							"or plain text — nothing that imitates a function call as text.",
+						Role:    llm.RoleUser,
+						Content: prompts.LeakRepeated,
 					})
 					stuckSteps = 0
 				}
@@ -207,15 +220,9 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 
 			if !a.cfg.SkipVerify && !verifiedOnce {
 				verifiedOnce = true
-				verifyMsg := "Before you finish: double-check that what you just did actually " +
-					"satisfies the original task. Re-read or re-list anything you're not " +
-					"certain about. If something is wrong, incomplete, or a placeholder, " +
-					"fix it now using your tools. If it's genuinely correct, just confirm."
+				verifyMsg := prompts.Verify
 				if mutatingSucceeded == 0 {
-					verifyMsg += fmt.Sprintf(" Concrete fact: 0 file-writing tool calls (%s) have "+
-						"succeeded so far in this run. If the task required creating or changing "+
-						"a file, that file does not exist yet — describing or generating content "+
-						"in your response text does not save it, only an actual tool call does.",
+					verifyMsg += fmt.Sprintf(prompts.VerifyZeroWrites,
 						strings.Join(a.cfg.MutatingTools, "/"))
 				}
 				if a.cfg.Verify != nil {
@@ -223,7 +230,7 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 						if out == "" {
 							out = "(no output)"
 						}
-						verifyMsg += fmt.Sprintf(" Build/test check result: %s", out)
+						verifyMsg += fmt.Sprintf(prompts.VerifyCheckResult, out)
 					}
 				}
 				history = append(history, llm.Message{Role: llm.RoleUser, Content: verifyMsg})
@@ -239,29 +246,53 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		repeat := signature == lastSignature
 		lastSignature = signature
 
-		// Tool calls within one step run concurrently — this is what
-		// makes multiple delegate_task calls in a single step actually
-		// run in parallel instead of one after another. Trade-off: a
-		// model that issues a write then a read of the *same* file in one
-		// step can no longer rely on them executing in that order. In
-		// practice multi-call steps are almost always independent reads
-		// or independent delegations, so this is worth it.
+		// Tool calls within one step are scheduled by Tool.Mode(), not run
+		// uniformly. Concurrent calls (reads, independent delegate_task
+		// calls, read-only checks) run together via goroutines — this is
+		// what makes multiple delegate_task calls in one step actually
+		// run in parallel. Exclusive calls (anything that mutates the
+		// workspace, or run_shell's unanalyzable arbitrary command) run
+		// one at a time and never overlap with the Concurrent batch or
+		// each other — a model issuing write_file then patch_file on the
+		// same file in one step can rely on that order; two reads can't
+		// race a write of the same path either way, in any order.
 		type callResult struct {
 			content string
 			err     error
 		}
 		results := make([]callResult, len(resp.Message.ToolCalls))
-		var wg sync.WaitGroup
-		for i, call := range resp.Message.ToolCalls {
-			wg.Add(1)
-			go func(i int, call llm.ToolCall) {
-				defer wg.Done()
-				content, err := a.cfg.Tools.Run(ctx, call.Name, call.Arguments)
-				results[i] = callResult{content: content, err: err}
-			}(i, call)
-		}
-		wg.Wait()
 
+		var concurrentIdx, exclusiveIdx []int
+		for i, call := range resp.Message.ToolCalls {
+			if a.cfg.Tools.ModeOf(call.Name) == Concurrent {
+				concurrentIdx = append(concurrentIdx, i)
+			} else {
+				exclusiveIdx = append(exclusiveIdx, i)
+			}
+		}
+
+		runOne := func(i int) {
+			call := resp.Message.ToolCalls[i]
+			content, err := a.cfg.Tools.Run(ctx, call.Name, call.Arguments)
+			results[i] = callResult{content: content, err: err}
+		}
+
+		if len(concurrentIdx) > 0 {
+			var wg sync.WaitGroup
+			for _, i := range concurrentIdx {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					runOne(i)
+				}(i)
+			}
+			wg.Wait()
+		}
+		for _, i := range exclusiveIdx {
+			runOne(i)
+		}
+
+		mutatingBefore := mutatingSucceeded
 		progressed := false
 		for i, call := range resp.Message.ToolCalls {
 			content := results[i].content
@@ -280,6 +311,16 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			})
 		}
 
+		if mutatingSucceeded > mutatingBefore {
+			exploratorySteps = 0
+		} else {
+			exploratorySteps++
+		}
+		if exploratorySteps >= a.cfg.MaxExploratorySteps && !searchFatigueWarned {
+			searchFatigueWarned = true
+			history = append(history, llm.Message{Role: llm.RoleUser, Content: prompts.SearchFatigue})
+		}
+
 		if budgetNudge != "" {
 			history = append(history, llm.Message{Role: llm.RoleUser, Content: budgetNudge})
 		}
@@ -292,14 +333,9 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 
 		stuckSteps++
 		if stuckSteps >= a.cfg.MaxStuckSteps {
-			nudge := "Every tool call has failed for several steps in a row. " +
-				"Stop repeating the same approach: re-read the error messages above, " +
-				"reconsider your plan, and try a different tool or a different strategy."
+			nudge := prompts.StuckFailing
 			if repeat {
-				nudge = "You've called the exact same tool with the exact same arguments " +
-					"several times in a row. Repeating it again will not produce a different " +
-					"result. State explicitly what you learned from the last call, and take a " +
-					"genuinely different next step."
+				nudge = prompts.StuckRepeating
 			}
 			history = append(history, llm.Message{Role: llm.RoleUser, Content: nudge})
 			stuckSteps = 0
@@ -353,16 +389,10 @@ func (a *Agent) budgetWarning(usage llm.Usage, warned *int) string {
 	switch {
 	case pct >= 90 && *warned < 90:
 		*warned = 90
-		return fmt.Sprintf("Context budget warning: %d/%d tokens used (%d%%). Wrap up now — "+
-			"finish this step and stop, or delegate any remaining self-contained work to "+
-			"delegate_task so it runs in a fresh context instead of growing this one.",
-			usage.PromptTokens, a.cfg.ContextLimit, pct)
+		return fmt.Sprintf(prompts.BudgetWarning, usage.PromptTokens, a.cfg.ContextLimit, pct)
 	case pct >= 75 && *warned < 75:
 		*warned = 75
-		return fmt.Sprintf("Context budget notice: %d/%d tokens used (%d%%). Consider wrapping "+
-			"up soon, or delegating self-contained remaining work to a subagent via "+
-			"delegate_task to keep this conversation's context smaller.",
-			usage.PromptTokens, a.cfg.ContextLimit, pct)
+		return fmt.Sprintf(prompts.BudgetNotice, usage.PromptTokens, a.cfg.ContextLimit, pct)
 	default:
 		return ""
 	}

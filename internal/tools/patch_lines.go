@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
 )
 
@@ -15,7 +16,8 @@ import (
 // isn't unique enough to match by content (e.g. "fix line 42").
 type PatchLines struct{ WS *workspace.Workspace }
 
-func (PatchLines) Name() string { return "patch_lines" }
+func (PatchLines) Name() string         { return "patch_lines" }
+func (PatchLines) Mode() agent.ToolMode { return agent.Exclusive }
 func (PatchLines) Description() string {
 	return "Replace a range of lines (1-indexed, inclusive) in a file with new content. " +
 		"Use this when editing by line number is clearer than matching exact text with patch_file."

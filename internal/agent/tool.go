@@ -12,11 +12,33 @@ import (
 	"agent-v4/internal/llm"
 )
 
+// ToolMode tells the loop whether a tool is safe to run concurrently with
+// other tool calls in the same step, or must run alone. A purely
+// type-level signal can't know whether two write_file calls in one step
+// touch the same path or different ones — rather than inspect arguments
+// to find out, every Exclusive tool just runs strictly alone. Simpler,
+// and the cost (occasionally serializing two writes to different files)
+// is small next to the alternative: a write racing a read of the same
+// path, or two patches racing each other.
+type ToolMode int
+
+const (
+	// Concurrent tools are safe to run alongside anything else in the
+	// same step: pure reads, independent delegated work, fire-and-forget
+	// process management.
+	Concurrent ToolMode = iota
+	// Exclusive tools mutate the workspace, or do something unanalyzable
+	// (an arbitrary shell command) — they run before anything else in
+	// the step starts, never overlapping with it.
+	Exclusive
+)
+
 // Tool is anything the agent can call by name with JSON arguments.
 type Tool interface {
 	Name() string
 	Description() string
 	Schema() json.RawMessage // JSON schema for the arguments object
+	Mode() ToolMode
 	Run(ctx context.Context, args json.RawMessage) (string, error)
 }
 
@@ -52,4 +74,14 @@ func (r *Registry) Run(ctx context.Context, name string, args json.RawMessage) (
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
 	return t.Run(ctx, args)
+}
+
+// ModeOf reports a tool's concurrency mode. An unknown name (shouldn't
+// happen — the model can only call tools it was offered) is treated as
+// Exclusive: the safe default when in doubt.
+func (r *Registry) ModeOf(name string) ToolMode {
+	if t, ok := r.tools[name]; ok {
+		return t.Mode()
+	}
+	return Exclusive
 }

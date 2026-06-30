@@ -137,17 +137,32 @@ tool_call_id pairing is a bigger, riskier piece of design than "tell the
 model the number and let it decide," which is also what was actually
 asked for. Revisit if nudging alone proves insufficient.
 
-## Parallel tool calls
+## Tool scheduling is mode-based, not flat-parallel
 
-Multiple tool calls within a single step run concurrently
-(`sync.WaitGroup`), not in a `for` loop one at a time. This is what makes
-two `delegate_task` calls in the same step actually run in parallel
-instead of sequentially. Trade-off, stated plainly: a model that issues a
-write then a read of the *same* file in one step can no longer rely on
-them executing in that order — multi-call steps in practice are almost
-always independent reads or independent delegations, so this was judged
-worth it. If that assumption breaks, the fix is narrowing which `Tool`s
-are eligible for concurrent execution, not reverting the whole mechanism.
+Every `Tool` declares a `Mode()`: `Concurrent` or `Exclusive`. Within one
+step, `Concurrent` calls (reads, `grep_files`, `check_url`,
+`delegate_task`, the background-process tools) run together via
+`sync.WaitGroup`; `Exclusive` calls (`write_file`, `patch_file`,
+`patch_lines`, `move_file`, `run_shell`) run one at a time, after the
+Concurrent batch, never overlapping each other or it.
+
+This replaced an earlier version where every call in a step ran in a flat
+`sync.WaitGroup` regardless of what it did — which meant a model issuing
+`write_file` then `read_file` on the same path in one step had no
+guaranteed ordering between them. Classifying by `Mode()` removes that
+failure surface without losing the actual win (independent
+`delegate_task` calls still run in parallel; reads still don't block on
+each other) — same "remove the failure surface" reasoning as `move_file`
+itself, applied one level up.
+
+`RunShell` is `Exclusive` unconditionally: an arbitrary shell command
+can't be analyzed for what it touches, so the safe default is to never
+let it overlap with anything. Background-process tools
+(`start_background`/`check_background`/`stop_background`) are
+`Concurrent` — they manage OS processes by id through a mutex-protected
+registry (`BackgroundProcesses`), not the workspace filesystem, so two
+processes starting in the same step (e.g. a backend + frontend dev
+server) is safe and worth parallelizing.
 
 ## Role is layered, not swapped
 
@@ -262,3 +277,57 @@ The `dev-server` skill carries the workflow these tools enable (start →
 wait → check_url → diagnose from check_background's real output if it
 fails) — the tools alone don't teach the sequence, same reasoning as
 every other skill file here.
+
+## Prompts live in internal/prompts/text/*.txt, not Go strings
+
+Every piece of text sent to the model that isn't task/tool data — system
+prompt, verify checkpoint, leak/stuck nudges, budget warnings, the resume
+note — is a plain `.txt` file under `internal/prompts/text/`, embedded via
+`go:embed` and exposed as trimmed string constants. The reason is git
+diffs, not aesthetics: a one-sentence wording change now shows as a
+one-line diff in a `.txt` file instead of being buried inside a multi-line
+Go string-concatenation expression. `cmd/agent/main.go` and
+`internal/agent/agent.go` both import `internal/prompts` rather than
+defining their own inline strings — if you're about to write a new
+`"..."` literal that gets sent to the model, it probably belongs there
+instead.
+
+## grep_files skips binary content — a real corruption, not a hypothetical
+
+`grep_files` originally had no content-based binary detection — only an
+`os.Open` failure (permissions) was treated as "skip." In practice, a
+wildcard pattern (`.*`) matched across a long stretch of a compiled
+`.exe` with no newlines, and raw non-UTF8 bytes — including control
+characters — went straight into the conversation history as a "match."
+This isn't just wasted context: corrupted history is exactly the kind of
+thing that can derail every response after it (and very likely did,
+based on a run that produced garbled mojibake output a couple of steps
+later).
+
+Fixed with a null-byte sniff on the first 8KB of each file (same
+heuristic git itself uses to classify files as binary) — binary files are
+skipped entirely before scanning, not just on open failure. Also added a
+per-line length cap (500 chars, with a truncation marker) as a second,
+independent safety net: even a legitimate text file with a pathologically
+long line (minified JS) shouldn't be able to dump an unbounded amount of
+content into one match.
+
+## Search fatigue: a step can "progress" while still going nowhere
+
+`MaxStuckSteps` catches two things: every tool call erroring, or an exact
+repeat of the previous step's call. Neither catches a model that keeps
+issuing genuinely *different* `grep_files`/`list_files` calls — new
+patterns, new directories — none of which error, none of which repeat,
+but none of which converge on an answer either. That's a different
+failure shape from "stuck," and it showed up in practice: 13 steps of
+narrowing regex variations and re-listing the same directories before the
+binary-file corruption above derailed the run entirely.
+
+`Config.MaxExploratorySteps` (default 8) tracks consecutive steps where
+no `MutatingTools` call actually succeeded — reset to zero the moment one
+does. Crossing the threshold injects one nudge (`prompts.SearchFatigue`,
+fire-once like the verify checkpoint): try a genuinely different angle
+(drop filters, simpler keywords, file types not yet tried), or stop and
+report findings instead of searching indefinitely. This is a generic
+lever, not a "grep harder" patch — it doesn't know or care what the
+exploratory tool calls were, only that mutation isn't happening.

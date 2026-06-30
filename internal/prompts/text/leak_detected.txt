@@ -1,0 +1,1 @@
+Your last response contains text that looks like an attempted tool call (e.g. "<|tool_call..." or "<tool_call>...") instead of a real one — nothing was executed, nothing was saved. Make the actual tool call properly using function-calling, not text that merely looks like one.

@@ -10,13 +10,15 @@ import (
 	"os"
 	"path/filepath"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
 )
 
 type ReadFile struct{ WS *workspace.Workspace }
 
-func (ReadFile) Name() string        { return "read_file" }
-func (ReadFile) Description() string { return "Read the full contents of a text file." }
+func (ReadFile) Name() string         { return "read_file" }
+func (ReadFile) Description() string  { return "Read the full contents of a text file." }
+func (ReadFile) Mode() agent.ToolMode { return agent.Concurrent }
 func (ReadFile) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -45,7 +47,8 @@ func (t ReadFile) Run(_ context.Context, args json.RawMessage) (string, error) {
 
 type WriteFile struct{ WS *workspace.Workspace }
 
-func (WriteFile) Name() string { return "write_file" }
+func (WriteFile) Name() string         { return "write_file" }
+func (WriteFile) Mode() agent.ToolMode { return agent.Exclusive }
 func (WriteFile) Description() string {
 	return "Write text content to a file, creating parent directories as needed."
 }
@@ -83,7 +86,8 @@ func (t WriteFile) Run(_ context.Context, args json.RawMessage) (string, error) 
 
 type ListFiles struct{ WS *workspace.Workspace }
 
-func (ListFiles) Name() string { return "list_files" }
+func (ListFiles) Name() string         { return "list_files" }
+func (ListFiles) Mode() agent.ToolMode { return agent.Concurrent }
 func (ListFiles) Description() string {
 	return "List files and directories under a path, non-recursively."
 }

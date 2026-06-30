@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"time"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
 )
 
@@ -18,6 +19,12 @@ type RunShell struct {
 }
 
 func (RunShell) Name() string { return "run_shell" }
+
+// Mode is Exclusive: an arbitrary shell command could do anything
+// (mutate files, hold a lock, depend on ordering) — there's no way to
+// tell from the string alone, so the safe default is to never run it
+// alongside other tool calls in the same step.
+func (RunShell) Mode() agent.ToolMode { return agent.Exclusive }
 func (RunShell) Description() string {
 	if runtime.GOOS == "windows" {
 		return "Run a command inside the workspace via cmd.exe (use Windows commands: " +

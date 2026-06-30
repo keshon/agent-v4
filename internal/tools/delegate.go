@@ -26,6 +26,12 @@ type Delegate struct {
 }
 
 func (Delegate) Name() string { return "delegate_task" }
+
+// Mode is Concurrent: delegate_task is explicitly for self-contained,
+// independent subtasks (see the system prompt's guidance to issue
+// multiple delegate_task calls in one step) — running them concurrently
+// is the entire reason that pattern exists.
+func (Delegate) Mode() agent.ToolMode { return agent.Concurrent }
 func (Delegate) Description() string {
 	return "Delegate a self-contained subtask to a fresh subagent and return its final result. " +
 		"Use this for work that can be fully described in one instruction and doesn't need the " +

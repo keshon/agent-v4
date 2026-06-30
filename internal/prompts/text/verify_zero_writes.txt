@@ -1,0 +1,1 @@
+ Concrete fact: 0 file-writing tool calls (%s) have succeeded so far in this run. If the task required creating or changing a file, that file does not exist yet — describing or generating content in your response text does not save it, only an actual tool call does.

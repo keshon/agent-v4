@@ -1,0 +1,1 @@
+Your previous attempt at this task was interrupted before finishing. Don't assume anything about what's already done — call list_files (and read_file where needed) to check the actual current state of the workspace first, then continue and finish the task.
