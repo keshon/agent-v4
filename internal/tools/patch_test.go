@@ -103,3 +103,27 @@ func TestPatchLines_InvalidRangeErrors(t *testing.T) {
 		t.Fatal("expected error for end_line < start_line")
 	}
 }
+
+func TestPatchFile_UnknownFieldErrors(t *testing.T) {
+	dir := t.TempDir()
+	ws, _ := workspace.New(dir)
+	os.WriteFile(filepath.Join(dir, "game.js"), []byte("x\n"), 0o644)
+
+	tool := PatchFile{WS: ws}
+	args, _ := json.Marshal(map[string]string{"path": "game.js", "command": "sed"})
+	if _, err := tool.Run(context.Background(), args); err == nil {
+		t.Fatal("expected error for unknown field")
+	}
+}
+
+func TestPatchLines_UnknownFieldErrors(t *testing.T) {
+	dir := t.TempDir()
+	ws, _ := workspace.New(dir)
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("a\n"), 0o644)
+
+	tool := PatchLines{WS: ws}
+	args, _ := json.Marshal(map[string]string{"path": "f.txt", "command": "sed"})
+	if _, err := tool.Run(context.Background(), args); err == nil {
+		t.Fatal("expected error for unknown field")
+	}
+}

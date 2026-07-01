@@ -19,23 +19,45 @@ const readMaxBytes = 128 * 1024 // cap one read_file result — mirrors grep_fil
 
 type ReadFile struct{ WS *workspace.Workspace }
 
-func (ReadFile) Name() string         { return "read_file" }
-func (ReadFile) Description() string  { return "Read the full contents of a text file." }
+func (ReadFile) Name() string { return "read_file" }
+func (ReadFile) Description() string {
+	return "Read a text file. Returns a FILE header (path, size, truncated, binary) and body. " +
+		"Set metadata_only or max_bytes=0 to get only the header — use this for file size or " +
+		"type checks without loading content into context."
+}
 func (ReadFile) Mode() agent.ToolMode { return agent.Concurrent }
 func (ReadFile) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
-		"properties": {"path": {"type": "string"}},
+		"properties": {
+			"path": {"type": "string"},
+			"metadata_only": {
+				"type": "boolean",
+				"description": "if true, return only the FILE header (size, truncated, binary) with no body"
+			},
+			"max_bytes": {
+				"type": "integer",
+				"description": "optional cap on body bytes; 0 means metadata only (same as metadata_only)"
+			}
+		},
 		"required": ["path"]
 	}`)
 }
 
 func (t ReadFile) Run(_ context.Context, args json.RawMessage) (string, error) {
 	var in struct {
-		Path string `json:"path"`
+		Path         string `json:"path"`
+		MetadataOnly bool   `json:"metadata_only"`
+		MaxBytes     *int   `json:"max_bytes"`
 	}
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
+	}
+	if err := rejectUnknownFields(args, "path", "metadata_only", "max_bytes"); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(in.Path) == "" {
+		return "", fmt.Errorf("path is required and must be non-empty")
 	}
 	full, err := t.WS.Resolve(in.Path)
 	if err != nil {
@@ -46,10 +68,21 @@ func (t ReadFile) Run(_ context.Context, args json.RawMessage) (string, error) {
 		return "", err
 	}
 	rel, _ := filepath.Rel(t.WS.Root(), full)
-	return formatReadFileResult(rel, data), nil
+
+	maxBody := readMaxBytes
+	if in.MetadataOnly {
+		maxBody = 0
+	} else if in.MaxBytes != nil {
+		if *in.MaxBytes < 0 {
+			return "", fmt.Errorf("max_bytes must be >= 0")
+		}
+		maxBody = *in.MaxBytes
+	}
+	return formatReadFileResult(rel, data, maxBody), nil
 }
 
-func formatReadFileResult(path string, data []byte) string {
+// maxBodyBytes: 0 = header only; otherwise cap body at min(maxBodyBytes, readMaxBytes).
+func formatReadFileResult(path string, data []byte, maxBodyBytes int) string {
 	totalSize := len(data)
 	truncated := totalSize > readMaxBytes
 	binary := looksBinaryBytes(data)
@@ -66,10 +99,22 @@ func formatReadFileResult(path string, data []byte) string {
 	if binary {
 		b.WriteString("binary: true\n")
 	}
+	if maxBodyBytes == 0 {
+		return b.String()
+	}
+	limit := maxBodyBytes
+	if limit > readMaxBytes {
+		limit = readMaxBytes
+	}
 	b.WriteString("----\n")
 	if truncated {
-		b.Write(data[:readMaxBytes])
-		fmt.Fprintf(&b, "\n...(content truncated at %d bytes — use grep_files or read a smaller section)", readMaxBytes)
+		b.Write(data[:limit])
+		if limit < totalSize {
+			fmt.Fprintf(&b, "\n...(content truncated at %d bytes — use grep_files, metadata_only, or read a smaller section)", limit)
+		}
+	} else if limit < totalSize {
+		b.Write(data[:limit])
+		fmt.Fprintf(&b, "\n...(content truncated at %d bytes)", limit)
 	} else {
 		b.Write(data)
 	}

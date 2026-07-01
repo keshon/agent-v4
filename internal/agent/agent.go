@@ -556,7 +556,14 @@ func (a *Agent) budgetWarning(usage llm.Usage, warned *int) string {
 // this check runs on the full content regardless of position.
 func looksLikeLeakedToolCall(content string) bool {
 	lower := strings.ToLower(content)
-	return strings.Contains(lower, "<tool_call") || strings.Contains(lower, "<|tool_call")
+	if strings.Contains(lower, "<tool_call") || strings.Contains(lower, "<|tool_call") {
+		return true
+	}
+	// Gemma-style narrative leaks: "(Made a function call call_92023 to read_file...)"
+	if strings.Contains(lower, "made a function call") {
+		return true
+	}
+	return strings.Contains(content, "call_") && strings.Contains(lower, "arguments=")
 }
 
 func containsStr(list []string, s string) bool {

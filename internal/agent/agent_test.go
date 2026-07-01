@@ -572,6 +572,37 @@ func TestAgent_LeakedToolCallText_IsNotTrustedAsFinish(t *testing.T) {
 	}
 }
 
+func TestAgent_GemmaStyleLeakedToolCall_IsNotTrustedAsFinish(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: `(Made a function call call_92023 to read_file with arguments={"path": "sample.go"})`}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done for real"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys", SkipVerify: true})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "done for real" {
+		t.Fatalf("result = %q, want %q", out, "done for real")
+	}
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "looks like an attempted tool call") {
+			return
+		}
+	}
+	t.Fatal("expected leak nudge for Gemma-style pseudo tool-call text")
+}
+
+func TestLooksLikeLeakedToolCall(t *testing.T) {
+	if !looksLikeLeakedToolCall(`(Made a function call call_1 to read_file with arguments={"path":"x"})`) {
+		t.Fatal("expected Gemma narrative leak to match")
+	}
+	if looksLikeLeakedToolCall("plain answer with no tools") {
+		t.Fatal("expected plain text not to match")
+	}
+}
+
 func TestAgent_VerifyMessage_StatesZeroWritesAsFact(t *testing.T) {
 	client := &stubClient{responses: []llm.ChatResponse{
 		{Message: llm.Message{Role: llm.RoleAssistant, Content: "I created the file."}},

@@ -45,6 +45,9 @@ func (t PatchLines) Run(_ context.Context, args json.RawMessage) (string, error)
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
 	}
+	if err := rejectUnknownFields(args, "path", "start_line", "end_line", "new_content"); err != nil {
+		return "", err
+	}
 	if in.StartLine < 1 || in.EndLine < in.StartLine {
 		return "", fmt.Errorf("invalid range: start_line=%d end_line=%d", in.StartLine, in.EndLine)
 	}

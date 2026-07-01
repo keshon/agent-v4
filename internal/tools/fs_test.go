@@ -71,3 +71,47 @@ func minLen(a, b int) int {
 	}
 	return b
 }
+
+func TestReadFile_MetadataOnly_NoBody(t *testing.T) {
+	dir := t.TempDir()
+	ws, err := workspace.New(dir)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	large := strings.Repeat("x", 200*1024)
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(large), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	args, _ := json.Marshal(map[string]any{"path": "big.txt", "metadata_only": true})
+	out, err := ReadFile{WS: ws}.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out, "----") {
+		t.Fatalf("metadata_only should not include body separator, got len %d", len(out))
+	}
+	if !strings.Contains(out, "size: 204800") || !strings.Contains(out, "truncated: true") {
+		t.Fatalf("expected size/truncated facts in header, got: %q", out)
+	}
+	if len(out) > 200 {
+		t.Fatalf("metadata_only output too large: %d bytes", len(out))
+	}
+}
+
+func TestReadFile_MaxBytesZero_SameAsMetadataOnly(t *testing.T) {
+	dir := t.TempDir()
+	ws, _ := workspace.New(dir)
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello"), 0o644)
+
+	zero := 0
+	args, _ := json.Marshal(map[string]any{"path": "f.txt", "max_bytes": zero})
+	out, err := ReadFile{WS: ws}.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(out, "hello") || strings.Contains(out, "----") {
+		t.Fatalf("max_bytes=0 should return header only, got: %q", out)
+	}
+}

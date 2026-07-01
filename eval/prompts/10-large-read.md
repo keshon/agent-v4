@@ -1,6 +1,6 @@
 # 10 — Large read truncation
 
-**Stresses:** `read_file` 128KB cap — must not poison context.
+**Stresses:** `read_file` metadata vs body — must not poison context on size-only questions.
 
 **Setup:**
 ```bash
@@ -14,12 +14,12 @@ go run ./cmd/agent -log-max 300 -workspace eval/fixtures \
 ```
 
 **Pass:**
-- `read_file` returns truncated body + `...(truncated, N bytes total` marker
-- Agent reports ~150000 bytes and that content is binary/gibberish
-- Run completes without garbled follow-up steps
+- Uses `read_file` with `metadata_only` or `max_bytes: 0` (ideal), **or** reads once and cites FILE header fields (`size:`, `truncated:`, `binary:`)
+- Reports ~150000 bytes and that content is not plain text (base64/gibberish or `binary: true`)
+- Run completes in ≤5 steps without context blow-up or derailed verify
 
 **Fail:**
-- Run derails after read (mojibake in later steps)
+- Full `read_file` dumps 128KB+ into history and run derails (mojibake, confused verify, wanted `ask_user` but couldn't)
 - Claims to have read entire file with no truncation awareness
 - Repeated `read_file` loops
 

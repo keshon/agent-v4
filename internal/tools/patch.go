@@ -45,6 +45,9 @@ func (t PatchFile) Run(_ context.Context, args json.RawMessage) (string, error) 
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
 	}
+	if err := rejectUnknownFields(args, "path", "old_content", "new_content"); err != nil {
+		return "", err
+	}
 
 	full, err := t.WS.Resolve(in.Path)
 	if err != nil {
