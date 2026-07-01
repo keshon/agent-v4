@@ -3,6 +3,23 @@
 Hand-run probes for a **local weak model** (12–25B). Not automated CI —
 the goal is to find failure *shapes*, not to score a number.
 
+## Reset fixtures between runs
+
+```bash
+./eval/reset-fixtures.sh
+# optional large file for prompt 10:
+head -c 150000 /dev/urandom | base64 > eval/fixtures/big.txt
+```
+
+## Repeatability matrix (accidental vs repeatable success)
+
+```bash
+./eval/repeatability.sh 01-git-ambiguous 5
+```
+
+Logs land in `eval/log/repeatability/`. Compare step counts and tool
+choices across runs. To isolate skills, temporarily rename `skills/git`.
+
 ## How to run
 
 From repo root, with koboldcpp (or similar) already up:

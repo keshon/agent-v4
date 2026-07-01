@@ -77,6 +77,21 @@ func TestChat_StringEncodedArguments(t *testing.T) {
 // TestNormalizeArguments_AcceptsObjectForm covers backends that send the
 // arguments object directly instead of string-encoding it — both shapes
 // must work, since not every local server follows the spec the same way.
+func TestRepairArguments_PassesThroughWithoutInputWrapper(t *testing.T) {
+	raw := json.RawMessage(`not-json-at-all`)
+	got := repairArguments(raw)
+	if string(got) != string(raw) {
+		t.Fatalf("repairArguments = %s, want passthrough %s", got, raw)
+	}
+
+	// Bare JSON string should also pass through — tools fail fast on schema.
+	bare := json.RawMessage(`"abc"`)
+	got = repairArguments(bare)
+	if string(got) != `"abc"` {
+		t.Fatalf("repairArguments = %s, want bare string passthrough", got)
+	}
+}
+
 func TestNormalizeArguments_AcceptsObjectForm(t *testing.T) {
 	raw := json.RawMessage(`{"command": "ls"}`)
 	got := normalizeArguments(raw)

@@ -29,8 +29,11 @@ func TestReadFile_TruncatesLargeFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(out, "...(truncated, ") {
+	if !strings.Contains(out, "...(content truncated at ") {
 		t.Fatalf("expected truncation marker, got len %d", len(out))
+	}
+	if !strings.Contains(out, "FILE\n") || !strings.Contains(out, "truncated: true") || !strings.Contains(out, "size: ") {
+		t.Fatalf("expected structured FILE header, got: %q", out[:minLen(200, len(out))])
 	}
 	if len(out) >= len(large) {
 		t.Fatalf("output not truncated: len %d", len(out))
@@ -54,7 +57,17 @@ func TestReadFile_SmallFileUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out != content {
-		t.Fatalf("output = %q, want %q", out, content)
+	if !strings.Contains(out, "FILE\n") || !strings.Contains(out, "truncated: false") {
+		t.Fatalf("expected structured FILE header, got: %q", out)
 	}
+	if !strings.Contains(out, "hello world") {
+		t.Fatalf("expected file content in output, got: %q", out)
+	}
+}
+
+func minLen(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

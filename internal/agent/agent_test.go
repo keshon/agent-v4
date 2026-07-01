@@ -27,6 +27,74 @@ func (s *stubClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatRespo
 	return resp, nil
 }
 
+func TestAgent_EmptyFinish_RetriesOnceBeforeReturning(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: ""}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "actual answer"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys", SkipVerify: true})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.calls != 2 {
+		t.Fatalf("calls = %d, want 2 (empty finish retried once)", client.calls)
+	}
+	if out != "actual answer" {
+		t.Fatalf("result = %q, want %q", out, "actual answer")
+	}
+}
+
+func TestAgent_DelegateMutations_CountTowardVerifyZeroWrites(t *testing.T) {
+	delegateArgs, _ := json.Marshal(map[string]string{"task": "write file"})
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "d", Name: "delegate_task", Arguments: delegateArgs},
+		}}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "delegated"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "confirmed"}},
+	}}
+	delegateTool := delegateStub{mutations: 1, result: "sub done"}
+	a := New(Config{
+		Client: client,
+		Tools:  NewRegistry(delegateTool),
+		System: "sys",
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, m := range client.lastHistory {
+		if strings.Contains(m.Content, "Concrete fact: 0 file-writing") {
+			t.Fatalf("delegate mutations should prevent zero-writes fact: %q", m.Content)
+		}
+	}
+}
+
+type delegateStub struct {
+	mutations int
+	result    string
+}
+
+func (d delegateStub) Name() string            { return "delegate_task" }
+func (d delegateStub) Description() string     { return "delegate" }
+func (d delegateStub) Mode() ToolMode          { return Concurrent }
+func (d delegateStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
+func (d delegateStub) Run(context.Context, json.RawMessage) (string, error) {
+	return fmt.Sprintf("DELEGATE\nmutations: %d\n----\n%s", d.mutations, d.result), nil
+}
+
+func TestParseDelegateMutations(t *testing.T) {
+	got := parseDelegateMutations("DELEGATE\nmutations: 2\n----\nsub result")
+	if got != 2 {
+		t.Fatalf("parseDelegateMutations = %d, want 2", got)
+	}
+	if parseDelegateMutations("plain text") != 0 {
+		t.Fatal("expected 0 for unstructured content")
+	}
+}
+
 func TestAgent_VerifyOnFinish_AddsOneRoundTrip(t *testing.T) {
 	client := &stubClient{responses: []llm.ChatResponse{
 		{Message: llm.Message{Role: llm.RoleAssistant, Content: "looks done"}},

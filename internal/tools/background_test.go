@@ -89,6 +89,7 @@ func TestCheckBackground_UnknownID(t *testing.T) {
 func TestCheckURL_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
 	}))
 	defer srv.Close()
 
@@ -98,8 +99,11 @@ func TestCheckURL_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.Contains(out, "200") {
-		t.Fatalf("expected status 200, got: %q", out)
+	if !strings.Contains(out, "HTTP\n") || !strings.Contains(out, "status: 200") {
+		t.Fatalf("expected structured HTTP header with 200, got: %q", out)
+	}
+	if !strings.Contains(out, "body-prefix:\nok") {
+		t.Fatalf("expected body-prefix with response body, got: %q", out)
 	}
 }
 
@@ -111,7 +115,7 @@ func TestCheckURL_ConnectionRefused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run returned a Go error, want a normal diagnostic result: %v", err)
 	}
-	if !strings.Contains(out, "request failed") {
+	if !strings.Contains(out, "error:") {
 		t.Fatalf("expected a connection failure message, got: %q", out)
 	}
 }

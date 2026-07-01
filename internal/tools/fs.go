@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"agent-v4/internal/agent"
 	"agent-v4/internal/workspace"
@@ -44,11 +45,48 @@ func (t ReadFile) Run(_ context.Context, args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(data) > readMaxBytes {
-		return string(data[:readMaxBytes]) + fmt.Sprintf(
-			"\n...(truncated, %d bytes total — use grep_files or read a smaller section)", len(data)), nil
+	rel, _ := filepath.Rel(t.WS.Root(), full)
+	return formatReadFileResult(rel, data), nil
+}
+
+func formatReadFileResult(path string, data []byte) string {
+	totalSize := len(data)
+	truncated := totalSize > readMaxBytes
+	binary := looksBinaryBytes(data)
+
+	var b strings.Builder
+	b.WriteString("FILE\n")
+	fmt.Fprintf(&b, "path: %s\n", path)
+	fmt.Fprintf(&b, "size: %d\n", totalSize)
+	if truncated {
+		b.WriteString("truncated: true\n")
+	} else {
+		b.WriteString("truncated: false\n")
 	}
-	return string(data), nil
+	if binary {
+		b.WriteString("binary: true\n")
+	}
+	b.WriteString("----\n")
+	if truncated {
+		b.Write(data[:readMaxBytes])
+		fmt.Fprintf(&b, "\n...(content truncated at %d bytes — use grep_files or read a smaller section)", readMaxBytes)
+	} else {
+		b.Write(data)
+	}
+	return b.String()
+}
+
+func looksBinaryBytes(data []byte) bool {
+	limit := len(data)
+	if limit > grepSniffBytes {
+		limit = grepSniffBytes
+	}
+	for _, b := range data[:limit] {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type WriteFile struct{ WS *workspace.Workspace }

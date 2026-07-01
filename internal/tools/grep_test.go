@@ -71,6 +71,30 @@ func TestGrepFiles_BadPatternErrors(t *testing.T) {
 	}
 }
 
+func TestGrepFiles_EmptyPatternErrors(t *testing.T) {
+	dir := t.TempDir()
+	ws, _ := workspace.New(dir)
+	tool := GrepFiles{WS: ws}
+	args, _ := json.Marshal(map[string]string{"path": ".", "pattern": ""})
+	if _, err := tool.Run(context.Background(), args); err == nil {
+		t.Fatal("expected error for empty pattern")
+	}
+}
+
+func TestGrepFiles_UnknownFieldErrors(t *testing.T) {
+	dir := t.TempDir()
+	ws, _ := workspace.New(dir)
+	tool := GrepFiles{WS: ws}
+	args, _ := json.Marshal(map[string]string{"path": ".", "command": "foo"})
+	_, err := tool.Run(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected error for unknown field")
+	}
+	if !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("error = %v, want unknown field mention", err)
+	}
+}
+
 func TestGrepFiles_SkipsBinaryFiles(t *testing.T) {
 	dir := t.TempDir()
 	ws, _ := workspace.New(dir)
@@ -93,7 +117,11 @@ func TestGrepFiles_SkipsBinaryFiles(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if strings.Contains(out, "app.exe") {
-		t.Fatalf("binary file should have been skipped entirely, got: %q", out[:min(200, len(out))])
+		preview := out
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		t.Fatalf("binary file should have been skipped entirely, got: %q", preview)
 	}
 	if !strings.Contains(out, "app.go") {
 		t.Fatalf("expected the real text file to still match, got: %q", out)
@@ -119,11 +147,4 @@ func TestGrepFiles_TruncatesLongLines(t *testing.T) {
 	if !strings.Contains(out, "...(truncated)") {
 		t.Fatalf("expected a truncation marker, got: %q", out)
 	}
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

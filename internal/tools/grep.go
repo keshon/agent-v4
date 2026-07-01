@@ -82,6 +82,15 @@ func (t GrepFiles) Run(_ context.Context, args json.RawMessage) (string, error) 
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
 	}
+	if err := rejectUnknownFields(args, "path", "pattern", "glob"); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(in.Path) == "" {
+		return "", fmt.Errorf("path is required and must be non-empty")
+	}
+	if strings.TrimSpace(in.Pattern) == "" {
+		return "", fmt.Errorf("pattern is required and must be non-empty")
+	}
 	re, err := regexp.Compile(in.Pattern)
 	if err != nil {
 		return "", fmt.Errorf("bad pattern: %w", err)

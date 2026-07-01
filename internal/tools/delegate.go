@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"agent-v4/internal/agent"
 )
@@ -84,5 +85,16 @@ func (d *Delegate) Run(ctx context.Context, args json.RawMessage) (string, error
 	defer func() { <-sem }()
 
 	sub := d.Spawn(in.Role)
-	return sub.Run(ctx, in.Task)
+	result, err := sub.Run(ctx, in.Task)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(result) == "" {
+		return "", fmt.Errorf("subagent returned empty result")
+	}
+	return formatDelegateResult(sub.LastRunMutations, result), nil
+}
+
+func formatDelegateResult(mutations int, result string) string {
+	return fmt.Sprintf("DELEGATE\nmutations: %d\n----\n%s", mutations, result)
 }

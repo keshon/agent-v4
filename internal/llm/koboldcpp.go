@@ -285,18 +285,11 @@ func encodeArguments(args json.RawMessage) json.RawMessage {
 	return json.RawMessage(wrapped)
 }
 
-// repairArguments handles exactly the kind of mess a weak local model
-// produces: arguments that aren't quite valid JSON (a bare string instead
-// of an object, trailing garbage, etc). This is backend-specific cleanup —
-// it belongs here, next to the wire format, not in the agent loop.
+// repairArguments passes wire-format arguments through unchanged. Valid
+// JSON (including a bare string instead of an object) reaches tools as-is
+// so they can fail fast with a clear schema error. Invalid bytes also pass
+// through — tools report bad arguments rather than masking mistakes behind
+// an {"input":"..."} wrapper.
 func repairArguments(raw json.RawMessage) json.RawMessage {
-	var probe json.RawMessage
-	if json.Unmarshal(raw, &probe) == nil {
-		return raw // already valid JSON
-	}
-	repaired, err := json.Marshal(map[string]string{"input": string(raw)})
-	if err != nil {
-		return json.RawMessage(`{}`)
-	}
-	return repaired
+	return raw
 }

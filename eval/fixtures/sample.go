@@ -1,8 +1,12 @@
 package sample
 
 // Version is the eval fixture version string.
-const Version = "v1"
+const Version = "v2"
 
 func Greet() string {
-	return "hello"
+	return "hi"
+}
+
+func Bye() string {
+	return "bye"
 }

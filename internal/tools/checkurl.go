@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"agent-v4/internal/agent"
 )
+
+const checkURLBodyMax = 512
 
 // CheckURL makes a real HTTP request instead of trusting a dev server's
 // startup banner — "Local: http://localhost:5173/" printed to stdout
@@ -50,8 +54,22 @@ func (CheckURL) Run(ctx context.Context, args json.RawMessage) (string, error) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		// Not a tool failure — this IS the diagnostic the model asked for.
-		return fmt.Sprintf("request failed: %v", err), nil
+		return fmt.Sprintf("HTTP\nurl: %s\nerror: %v", in.URL, err), nil
 	}
 	defer resp.Body.Close()
-	return fmt.Sprintf("status: %d %s", resp.StatusCode, resp.Status), nil
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, checkURLBodyMax))
+	return formatHTTPResult(in.URL, resp.StatusCode, resp.Status, body), nil
+}
+
+func formatHTTPResult(url string, code int, status string, body []byte) string {
+	var b strings.Builder
+	b.WriteString("HTTP\n")
+	fmt.Fprintf(&b, "url: %s\n", url)
+	fmt.Fprintf(&b, "status: %d %s\n", code, status)
+	b.WriteString("body-prefix:\n")
+	b.Write(body)
+	if len(body) == checkURLBodyMax {
+		b.WriteString("\n...(body-prefix truncated)")
+	}
+	return b.String()
 }

@@ -1,2 +1,0 @@
-- add glob param to list_files
-- verify grep + patch_lines combo

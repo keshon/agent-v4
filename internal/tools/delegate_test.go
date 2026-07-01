@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -42,8 +43,11 @@ func TestDelegate_PassesRoleToSpawn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out != "done" {
-		t.Fatalf("result = %q, want %q", out, "done")
+	if !strings.Contains(out, "done") {
+		t.Fatalf("result = %q, want subagent answer embedded", out)
+	}
+	if !strings.Contains(out, "DELEGATE\nmutations: 0") {
+		t.Fatalf("expected DELEGATE header, got: %q", out)
 	}
 	if gotRole != "Alice, a software engineer from London who loves tea" {
 		t.Fatalf("role passed to Spawn = %q, want the role text", gotRole)
@@ -121,4 +125,71 @@ func TestDelegate_LimitsConcurrentSubagents(t *testing.T) {
 	if atomic.LoadInt32(&maxActive) > 2 {
 		t.Fatalf("max concurrent subagents = %d, want <= 2", maxActive)
 	}
+}
+
+func TestDelegate_EmptyResultErrors(t *testing.T) {
+	d := &Delegate{
+		Spawn: func(role string) *agent.Agent {
+			return agent.New(agent.Config{
+				Client:     stubSubClient{answer: "   "},
+				Tools:      agent.NewRegistry(),
+				System:     "base",
+				SkipVerify: true,
+			})
+		},
+	}
+	args, _ := json.Marshal(map[string]string{"task": "work"})
+	if _, err := d.Run(context.Background(), args); err == nil {
+		t.Fatal("expected error for empty subagent result")
+	}
+}
+
+func TestDelegate_ReportsSubagentMutations(t *testing.T) {
+	writeArgs, _ := json.Marshal(map[string]string{"path": "x.txt", "content": "hi"})
+	d := &Delegate{
+		Spawn: func(role string) *agent.Agent {
+			return agent.New(agent.Config{
+				Client: &stubClientSequence{
+					responses: []llm.ChatResponse{
+						{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+							{ID: "w", Name: "write_file", Arguments: writeArgs},
+						}}},
+						{Message: llm.Message{Role: llm.RoleAssistant, Content: "wrote file"}},
+					},
+				},
+				Tools:      agent.NewRegistry(echoWriteStub{}),
+				System:     "base",
+				SkipVerify: true,
+			})
+		},
+	}
+	args, _ := json.Marshal(map[string]string{"task": "write x.txt"})
+	out, err := d.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "mutations: 1") {
+		t.Fatalf("expected mutations count in result, got: %q", out)
+	}
+}
+
+type echoWriteStub struct{}
+
+func (echoWriteStub) Name() string            { return "write_file" }
+func (echoWriteStub) Description() string     { return "write" }
+func (echoWriteStub) Mode() agent.ToolMode    { return agent.Exclusive }
+func (echoWriteStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
+func (echoWriteStub) Run(context.Context, json.RawMessage) (string, error) {
+	return "ok", nil
+}
+
+type stubClientSequence struct {
+	responses []llm.ChatResponse
+	calls     int
+}
+
+func (c *stubClientSequence) Chat(_ context.Context, _ llm.ChatRequest) (llm.ChatResponse, error) {
+	resp := c.responses[c.calls]
+	c.calls++
+	return resp, nil
 }

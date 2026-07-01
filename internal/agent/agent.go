@@ -101,6 +101,11 @@ type Config struct {
 
 type Agent struct {
 	cfg Config
+
+	// LastRunMutations counts successful MutatingTools calls from the
+	// most recent completed run. Set when Run/Resume returns; readable by
+	// delegate_task to report subagent filesystem changes to the parent.
+	LastRunMutations int
 }
 
 func New(cfg Config) *Agent {
@@ -219,11 +224,13 @@ type runState struct {
 	stuckSteps, exploratorySteps, mutatingSucceeded, warnedThreshold, lastPromptTokens int
 	consecutiveSameToolCount                                                          int
 	verifiedOnce, searchFatigueWarned, compactedOnce, blockFinishDueToVerify, toolLoopWarned bool
+	emptyFinishRetried                                                                 bool
 	lastSignature, verifyFailedOutput, lastSingleTool string
 }
 
 func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) {
 	var st runState
+	a.LastRunMutations = 0
 
 	for step := 0; step < a.cfg.MaxSteps; step++ {
 		resp, err := a.cfg.Client.Chat(ctx, llm.ChatRequest{
@@ -303,6 +310,13 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 				}
 				continue
 			}
+			if strings.TrimSpace(resp.Message.Content) == "" {
+				if !st.emptyFinishRetried {
+					st.emptyFinishRetried = true
+					continue
+				}
+			}
+			a.LastRunMutations = st.mutatingSucceeded
 			return resp.Message.Content, nil
 		}
 
@@ -367,6 +381,11 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 				if containsStr(a.cfg.MutatingTools, call.Name) {
 					st.mutatingSucceeded++
 				}
+				if call.Name == "delegate_task" {
+					if m := parseDelegateMutations(content); m > 0 {
+						st.mutatingSucceeded += m
+					}
+				}
 			}
 			history = append(history, llm.Message{
 				Role:       llm.RoleTool,
@@ -414,6 +433,26 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 	}
 
 	return "", fmt.Errorf("reached max steps (%d) without finishing", a.cfg.MaxSteps)
+}
+
+// parseDelegateMutations reads the structured DELEGATE header from a
+// delegate_task result so the parent run can count subagent writes.
+func parseDelegateMutations(content string) int {
+	if !strings.HasPrefix(content, "DELEGATE\n") {
+		return 0
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "mutations: ") {
+			var n int
+			if _, err := fmt.Sscanf(line, "mutations: %d", &n); err == nil {
+				return n
+			}
+		}
+		if line == "----" {
+			break
+		}
+	}
+	return 0
 }
 
 func (a *Agent) maybeCompact(history *[]llm.Message, usage llm.Usage, st *runState) bool {
