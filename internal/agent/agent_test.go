@@ -805,3 +805,85 @@ func (c *mixedExploreWriteClient) Chat(_ context.Context, req llm.ChatRequest) (
 		ToolCalls: []llm.ToolCall{{ID: "c", Name: "grep_files", Arguments: args}},
 	}}, nil
 }
+
+func TestPausedOnQuestion_DetectsAskUserCall(t *testing.T) {
+	args, _ := json.Marshal(map[string]string{"question": "which database?"})
+	history := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "do the thing"},
+		{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCall{
+			{ID: "call_q1", Name: "ask_user", Arguments: args},
+		}},
+	}
+
+	callID, question, ok := PausedOnQuestion(history)
+	if !ok {
+		t.Fatal("PausedOnQuestion returned false for a history ending with ask_user")
+	}
+	if callID != "call_q1" {
+		t.Fatalf("callID = %q, want %q", callID, "call_q1")
+	}
+	if question != "which database?" {
+		t.Fatalf("question = %q, want %q", question, "which database?")
+	}
+}
+
+func TestPausedOnQuestion_ReturnsFalseForNormalHistory(t *testing.T) {
+	history := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "task"},
+		{Role: llm.RoleAssistant, Content: "I wrote the file."},
+	}
+	_, _, ok := PausedOnQuestion(history)
+	if ok {
+		t.Fatal("PausedOnQuestion returned true for a normal text response")
+	}
+}
+
+func TestPausedOnQuestion_ReturnsFalseForEmptyHistory(t *testing.T) {
+	_, _, ok := PausedOnQuestion(nil)
+	if ok {
+		t.Fatal("PausedOnQuestion returned true for empty history")
+	}
+}
+
+func TestResumeWithAnswer_SuppliesWireCorrectToolResult(t *testing.T) {
+	// Reproduces the "wire-invalid conversation" problem that plain Resume
+	// would cause: the answer must arrive as role:tool with the matching
+	// tool_call_id, not as a naked role:user message.
+	args, _ := json.Marshal(map[string]string{"question": "which database?"})
+	pausedHistory := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "build a thing"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "call_q1", Name: "ask_user", Arguments: args},
+		}},
+	}
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "ok, using sqlite"}},
+	}}
+	a := New(Config{Client: client, Tools: NewRegistry(), System: "sys", SkipVerify: true})
+
+	out, err := a.ResumeWithAnswer(context.Background(), pausedHistory, "call_q1", "sqlite please")
+	if err != nil {
+		t.Fatalf("ResumeWithAnswer: %v", err)
+	}
+	if out != "ok, using sqlite" {
+		t.Fatalf("result = %q, want %q", out, "ok, using sqlite")
+	}
+
+	// The history the model received must contain role:tool, not role:user,
+	// for the answer.
+	var foundToolResult bool
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleTool && m.ToolCallID == "call_q1" && m.Content == "sqlite please" {
+			foundToolResult = true
+		}
+		if m.Role == llm.RoleUser && m.Content == "sqlite please" {
+			t.Fatal("answer was sent as role:user instead of role:tool — wire-invalid")
+		}
+	}
+	if !foundToolResult {
+		t.Fatal("no role:tool message with the answer found in sent history")
+	}
+}

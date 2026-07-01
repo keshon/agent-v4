@@ -82,6 +82,12 @@ var (
 	// searching but not converging. Nudges it to broaden its approach or
 	// stop and ask, instead of indefinitely narrowing the same dead end.
 	SearchFatigue = read("search_fatigue.txt")
+
+	// AskUserSent is appended to history as a system note after an
+	// ask_user tool call actually blocks on stdin — it lets the model
+	// know it's paused awaiting a human answer, and the answer will
+	// arrive as the next message.
+	AskUserSent = read("ask_user_sent.txt")
 )
 
 // WithRole returns System with RoleAddendum appended for role, or System

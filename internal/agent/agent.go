@@ -138,6 +138,46 @@ func (a *Agent) Resume(ctx context.Context, history []llm.Message, note string) 
 	return a.run(ctx, history)
 }
 
+// PausedOnQuestion reports whether the last message in history is an
+// assistant message containing an unanswered ask_user tool call. This is
+// the correct way to distinguish "interrupted by a question" from
+// "interrupted by a crash/timeout" when deciding which resume path to
+// take.
+func PausedOnQuestion(history []llm.Message) (callID string, question string, ok bool) {
+	if len(history) == 0 {
+		return "", "", false
+	}
+	last := history[len(history)-1]
+	if last.Role != llm.RoleAssistant {
+		return "", "", false
+	}
+	for _, tc := range last.ToolCalls {
+		if tc.Name == "ask_user" {
+			var args struct {
+				Question string `json:"question"`
+			}
+			json.Unmarshal(tc.Arguments, &args)
+			return tc.ID, args.Question, true
+		}
+	}
+	return "", "", false
+}
+
+// ResumeWithAnswer continues from a history that ended with an unanswered
+// ask_user tool call. answer is synthesized as the proper role:tool,
+// tool_call_id message before the loop resumes — NOT as a plain user
+// message, which would produce a wire-invalid conversation (a backend
+// expects every tool_call to get its matching tool-result before anything
+// else, not a naked user message after an unanswered call).
+func (a *Agent) ResumeWithAnswer(ctx context.Context, history []llm.Message, callID, answer string) (string, error) {
+	history = append(history, llm.Message{
+		Role:       llm.RoleTool,
+		ToolCallID: callID,
+		Content:    answer,
+	})
+	return a.run(ctx, history)
+}
+
 // LoadState reads a history previously written via Config.StateFile.
 func LoadState(path string) ([]llm.Message, error) {
 	data, err := os.ReadFile(path)

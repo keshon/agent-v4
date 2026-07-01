@@ -33,6 +33,17 @@ const (
 	Exclusive
 )
 
+func (m ToolMode) String() string {
+	switch m {
+	case Concurrent:
+		return "Concurrent"
+	case Exclusive:
+		return "Exclusive"
+	default:
+		return "unknown"
+	}
+}
+
 // Tool is anything the agent can call by name with JSON arguments.
 type Tool interface {
 	Name() string

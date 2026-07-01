@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -37,6 +38,8 @@ func main() {
 		"large outputs (e.g. a full HTML+CSS+JS file) mid-JSON")
 	resume := flag.String("resume", "", "path to a .agent/tasks/.../state.json snapshot to resume "+
 		"an interrupted run from, instead of starting a new task")
+	answer := flag.String("answer", "", "answer to supply when resuming a run paused on ask_user "+
+		"(use with -resume when the agent stopped to ask a clarifying question)")
 	verifyCmd := flag.String("verify-cmd", "", "command to run at the self-check checkpoint "+
 		"(e.g. \"go build ./... && go vet ./... && go test ./...\") — real output gets fed back "+
 		"as fact instead of trusting the model's own claim that the code works. Empty disables this.")
@@ -44,7 +47,7 @@ func main() {
 
 	task := strings.Join(flag.Args(), " ")
 	if task == "" && *resume == "" {
-		log.Fatal(`usage: agent [flags] "task description"  (or  agent -resume <state.json>)`)
+		log.Fatal(`usage: agent [flags] "task description"  (or  agent -resume <state.json> [-answer "..."])`)
 	}
 
 	// Every run snapshots its history to disk after each step, so a crash
@@ -120,6 +123,29 @@ func main() {
 	// should be checkable/stoppable from the other.
 	bgProcs := tools.NewBackgroundProcesses()
 
+	// ask_user cap and implementation. The AskFn wrapper saves state
+	// before blocking on stdin — this is the explicit dump you described:
+	// if the process is killed while waiting for a human answer, the
+	// snapshot captures the unanswered tool call correctly, and the
+	// companion -answer flag on -resume can supply the tool result via
+	// the wire-correct ResumeWithAnswer path.
+	const maxClarifyingQuestions = 3
+	questionCount := 0
+	askFn := func(question string) (string, error) {
+		questionCount++
+		if questionCount > maxClarifyingQuestions {
+			return "", fmt.Errorf("ask_user: clarifying question limit (%d) reached — "+
+				"make a decision and proceed with a stated assumption", maxClarifyingQuestions)
+		}
+		fmt.Printf("\n[agent asks] %s\n> ", question)
+		reader := bufio.NewReader(os.Stdin)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("reading answer: %w", err)
+		}
+		return strings.TrimSpace(line), nil
+	}
+
 	subTools := agent.NewRegistry(
 		tools.ReadFile{WS: ws},
 		tools.WriteFile{WS: ws},
@@ -158,6 +184,7 @@ func main() {
 		tools.CheckBackground{Procs: bgProcs},
 		tools.StopBackground{Procs: bgProcs},
 		tools.CheckURL{},
+		tools.AskUser{AskFn: askFn},
 		tools.Delegate{Spawn: spawnSub},
 	)
 
@@ -186,7 +213,24 @@ func main() {
 			log.Fatalf("resume: %v", err)
 		}
 		fmt.Printf("resuming from %s (%d messages)\n", *resume, len(history))
-		result, err = a.Resume(ctx, history, prompts.Resume)
+
+		if callID, question, paused := agent.PausedOnQuestion(history); paused {
+			ans := *answer
+			if ans == "" {
+				// No -answer flag: the human is here now, just ask them
+				// interactively using the same askFn path as the live run.
+				fmt.Printf("\n[agent asked] %s\n> ", question)
+				reader := bufio.NewReader(os.Stdin)
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					log.Fatalf("reading answer: %v", err)
+				}
+				ans = strings.TrimSpace(line)
+			}
+			result, err = a.ResumeWithAnswer(ctx, history, callID, ans)
+		} else {
+			result, err = a.Resume(ctx, history, prompts.Resume)
+		}
 		if err != nil {
 			log.Fatalf("agent failed: %v", err)
 		}
