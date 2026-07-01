@@ -92,6 +92,11 @@ type Config struct {
 	// code actually work." Nil means skip this (most projects don't have
 	// one canned command that makes sense).
 	Verify func(ctx context.Context) (output string, ok bool)
+
+	// CompactKeepSteps is how many recent assistant-led step groups to
+	// retain when history is mechanically compacted at 90% context usage.
+	// Defaults to 8 in New. Set to -1 to disable compaction.
+	CompactKeepSteps int
 }
 
 type Agent struct {
@@ -113,6 +118,9 @@ func New(cfg Config) *Agent {
 	}
 	if len(cfg.MutatingTools) == 0 {
 		cfg.MutatingTools = []string{"write_file", "patch_file", "patch_lines", "move_file"}
+	}
+	if cfg.CompactKeepSteps == 0 {
+		cfg.CompactKeepSteps = 8
 	}
 	return &Agent{cfg: cfg}
 }
@@ -207,21 +215,21 @@ func (a *Agent) saveState(history []llm.Message) {
 	_ = os.WriteFile(a.cfg.StateFile, data, 0o644)
 }
 
+type runState struct {
+	stuckSteps, exploratorySteps, mutatingSucceeded, warnedThreshold, lastPromptTokens int
+	consecutiveSameToolCount                                                          int
+	verifiedOnce, searchFatigueWarned, compactedOnce, blockFinishDueToVerify, toolLoopWarned bool
+	lastSignature, verifyFailedOutput, lastSingleTool string
+}
+
 func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) {
-	stuckSteps := 0
-	verifiedOnce := false
-	lastSignature := ""
-	warnedThreshold := 0
-	lastPromptTokens := 0
-	mutatingSucceeded := 0
-	exploratorySteps := 0
-	searchFatigueWarned := false
+	var st runState
 
 	for step := 0; step < a.cfg.MaxSteps; step++ {
 		resp, err := a.cfg.Client.Chat(ctx, llm.ChatRequest{
 			Messages:  history,
 			Tools:     a.cfg.Tools.Defs(),
-			MaxTokens: a.effectiveMaxTokens(lastPromptTokens),
+			MaxTokens: a.effectiveMaxTokens(st.lastPromptTokens),
 		})
 		if err != nil {
 			return "", fmt.Errorf("step %d: chat: %w", step, err)
@@ -230,10 +238,11 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			a.cfg.OnStep(step, resp.Message)
 		}
 		history = append(history, resp.Message)
-		budgetNudge := a.budgetWarning(resp.Usage, &warnedThreshold)
+		budgetNudge := a.budgetWarning(resp.Usage, &st.warnedThreshold)
 		if resp.Usage.PromptTokens > 0 {
-			lastPromptTokens = resp.Usage.PromptTokens
+			st.lastPromptTokens = resp.Usage.PromptTokens
 		}
+		a.maybeCompact(&history, resp.Usage, &st)
 		a.saveState(history)
 
 		if len(resp.Message.ToolCalls) == 0 {
@@ -247,21 +256,32 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 					Role:    llm.RoleUser,
 					Content: prompts.LeakDetected,
 				})
-				stuckSteps++
-				if stuckSteps >= a.cfg.MaxStuckSteps {
+				st.stuckSteps++
+				if st.stuckSteps >= a.cfg.MaxStuckSteps {
 					history = append(history, llm.Message{
 						Role:    llm.RoleUser,
 						Content: prompts.LeakRepeated,
 					})
-					stuckSteps = 0
+					st.stuckSteps = 0
 				}
 				continue
 			}
 
-			if !a.cfg.SkipVerify && !verifiedOnce {
-				verifiedOnce = true
+			if st.blockFinishDueToVerify {
+				st.blockFinishDueToVerify = false
+				st.verifiedOnce = false
+				history = append(history, llm.Message{
+					Role:    llm.RoleUser,
+					Content: fmt.Sprintf(prompts.VerifyFailedContinue, st.verifyFailedOutput),
+				})
+				st.verifyFailedOutput = ""
+				continue
+			}
+
+			if !a.cfg.SkipVerify && !st.verifiedOnce {
+				st.verifiedOnce = true
 				verifyMsg := prompts.Verify
-				if mutatingSucceeded == 0 {
+				if st.mutatingSucceeded == 0 {
 					verifyMsg += fmt.Sprintf(prompts.VerifyZeroWrites,
 						strings.Join(a.cfg.MutatingTools, "/"))
 				}
@@ -271,6 +291,10 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 							out = "(no output)"
 						}
 						verifyMsg += fmt.Sprintf(prompts.VerifyCheckResult, out)
+						if strings.HasPrefix(out, "FAILED") {
+							st.blockFinishDueToVerify = true
+							st.verifyFailedOutput = out
+						}
 					}
 				}
 				history = append(history, llm.Message{Role: llm.RoleUser, Content: verifyMsg})
@@ -283,8 +307,8 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		}
 
 		signature := callSignature(resp.Message.ToolCalls)
-		repeat := signature == lastSignature
-		lastSignature = signature
+		repeat := signature == st.lastSignature
+		st.lastSignature = signature
 
 		// Tool calls within one step are scheduled by Tool.Mode(), not run
 		// uniformly. Concurrent calls (reads, independent delegate_task
@@ -332,7 +356,7 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			runOne(i)
 		}
 
-		mutatingBefore := mutatingSucceeded
+		mutatingBefore := st.mutatingSucceeded
 		progressed := false
 		for i, call := range resp.Message.ToolCalls {
 			content := results[i].content
@@ -341,7 +365,7 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			} else {
 				progressed = true
 				if containsStr(a.cfg.MutatingTools, call.Name) {
-					mutatingSucceeded++
+					st.mutatingSucceeded++
 				}
 			}
 			history = append(history, llm.Message{
@@ -351,14 +375,20 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			})
 		}
 
-		if mutatingSucceeded > mutatingBefore {
-			exploratorySteps = 0
+		if st.mutatingSucceeded > mutatingBefore {
+			st.exploratorySteps = 0
 		} else {
-			exploratorySteps++
+			st.exploratorySteps++
 		}
-		if exploratorySteps >= a.cfg.MaxExploratorySteps && !searchFatigueWarned {
-			searchFatigueWarned = true
+		if st.exploratorySteps >= a.cfg.MaxExploratorySteps && !st.searchFatigueWarned {
+			st.searchFatigueWarned = true
 			history = append(history, llm.Message{Role: llm.RoleUser, Content: prompts.SearchFatigue})
+		}
+
+		a.trackSingleToolLoop(resp.Message.ToolCalls, &st)
+		if st.consecutiveSameToolCount >= 3 && !st.toolLoopWarned {
+			st.toolLoopWarned = true
+			history = append(history, llm.Message{Role: llm.RoleUser, Content: prompts.ToolLoop})
 		}
 
 		if budgetNudge != "" {
@@ -367,23 +397,58 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		a.saveState(history)
 
 		if progressed && !repeat {
-			stuckSteps = 0
+			st.stuckSteps = 0
 			continue
 		}
 
-		stuckSteps++
-		if stuckSteps >= a.cfg.MaxStuckSteps {
+		st.stuckSteps++
+		if st.stuckSteps >= a.cfg.MaxStuckSteps {
 			nudge := prompts.StuckFailing
 			if repeat {
 				nudge = prompts.StuckRepeating
 			}
 			history = append(history, llm.Message{Role: llm.RoleUser, Content: nudge})
-			stuckSteps = 0
-			lastSignature = "" // the nudge itself breaks the repeat chain
+			st.stuckSteps = 0
+			st.lastSignature = "" // the nudge itself breaks the repeat chain
 		}
 	}
 
 	return "", fmt.Errorf("reached max steps (%d) without finishing", a.cfg.MaxSteps)
+}
+
+func (a *Agent) maybeCompact(history *[]llm.Message, usage llm.Usage, st *runState) bool {
+	if st.compactedOnce || a.cfg.ContextLimit <= 0 || a.cfg.CompactKeepSteps <= 0 {
+		return false
+	}
+	if usage.PromptTokens <= 0 {
+		return false
+	}
+	pct := usage.PromptTokens * 100 / a.cfg.ContextLimit
+	if pct < 90 {
+		return false
+	}
+	*history = compactHistory(*history, a.cfg.CompactKeepSteps)
+	st.compactedOnce = true
+	return true
+}
+
+// trackSingleToolLoop counts consecutive steps where the model issued
+// exactly one tool call and it's the same tool name as the previous
+// such step — catches run_shell/git-log tweak loops that exact-repeat
+// detection misses because the arguments differ slightly each time.
+func (a *Agent) trackSingleToolLoop(calls []llm.ToolCall, st *runState) {
+	if len(calls) != 1 {
+		st.lastSingleTool = ""
+		st.consecutiveSameToolCount = 0
+		return
+	}
+	name := calls[0].Name
+	if name == st.lastSingleTool {
+		st.consecutiveSameToolCount++
+		return
+	}
+	st.lastSingleTool = name
+	st.consecutiveSameToolCount = 1
 }
 
 // budgetWarning returns a one-time nudge when usage crosses a new context

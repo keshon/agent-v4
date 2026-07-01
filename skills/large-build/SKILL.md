@@ -25,3 +25,9 @@ parallel pieces (N unrelated files). A single cohesive file (an engine,
 a tightly-coupled module) is not parallelizable — building it is
 inherently sequential, so do it yourself, incrementally, in this same
 conversation.
+
+When a task naturally splits into multiple independent, non-overlapping
+pieces — several similar files to create, several unrelated checks to
+run — issue one delegate_task call per piece in the SAME step; independent
+calls in one step run in parallel. If a subtask needs a specific
+expertise or mindset, pass it via delegate_task's role field.

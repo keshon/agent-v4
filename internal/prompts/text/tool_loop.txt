@@ -1,0 +1,1 @@
+You've called the same tool several steps in a row with only small argument changes. That pattern usually means the approach isn't working. State what the last result actually showed, then switch to a genuinely different tool or command — don't tweak the same call again.

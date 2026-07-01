@@ -14,6 +14,8 @@ import (
 	"agent-v4/internal/workspace"
 )
 
+const readMaxBytes = 128 * 1024 // cap one read_file result — mirrors grep_files safety nets
+
 type ReadFile struct{ WS *workspace.Workspace }
 
 func (ReadFile) Name() string         { return "read_file" }
@@ -41,6 +43,10 @@ func (t ReadFile) Run(_ context.Context, args json.RawMessage) (string, error) {
 	data, err := os.ReadFile(full)
 	if err != nil {
 		return "", err
+	}
+	if len(data) > readMaxBytes {
+		return string(data[:readMaxBytes]) + fmt.Sprintf(
+			"\n...(truncated, %d bytes total — use grep_files or read a smaller section)", len(data)), nil
 	}
 	return string(data), nil
 }

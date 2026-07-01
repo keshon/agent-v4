@@ -43,6 +43,8 @@ func main() {
 	verifyCmd := flag.String("verify-cmd", "", "command to run at the self-check checkpoint "+
 		"(e.g. \"go build ./... && go vet ./... && go test ./...\") — real output gets fed back "+
 		"as fact instead of trusting the model's own claim that the code works. Empty disables this.")
+	logMax := flag.Int("log-max", 300, "max characters per line in step console output; "+
+		"long text is truncated in the middle (head ... tail). 0 = no limit")
 	flag.Parse()
 
 	task := strings.Join(flag.Args(), " ")
@@ -123,12 +125,10 @@ func main() {
 	// should be checkable/stoppable from the other.
 	bgProcs := tools.NewBackgroundProcesses()
 
-	// ask_user cap and implementation. The AskFn wrapper saves state
-	// before blocking on stdin — this is the explicit dump you described:
-	// if the process is killed while waiting for a human answer, the
-	// snapshot captures the unanswered tool call correctly, and the
-	// companion -answer flag on -resume can supply the tool result via
-	// the wire-correct ResumeWithAnswer path.
+	// ask_user blocks on stdin inside the tool. State is snapshotted by
+	// the agent loop after the assistant message (with the unanswered tool
+	// call) and before tool execution — so Ctrl+C while waiting leaves a
+	// resumable state.json. Use -resume with -answer to continue.
 	const maxClarifyingQuestions = 3
 	questionCount := 0
 	askFn := func(question string) (string, error) {
@@ -137,6 +137,8 @@ func main() {
 			return "", fmt.Errorf("ask_user: clarifying question limit (%d) reached — "+
 				"make a decision and proceed with a stated assumption", maxClarifyingQuestions)
 		}
+		fmt.Printf("\n[paused — state saved at %s]\n", stateFile)
+		fmt.Printf("[resume: agent -resume %s -answer \"your answer\"]\n", stateFile)
 		fmt.Printf("\n[agent asks] %s\n> ", question)
 		reader := bufio.NewReader(os.Stdin)
 		line, err := reader.ReadString('\n')
@@ -146,47 +148,22 @@ func main() {
 		return strings.TrimSpace(line), nil
 	}
 
-	subTools := agent.NewRegistry(
-		tools.ReadFile{WS: ws},
-		tools.WriteFile{WS: ws},
-		tools.PatchFile{WS: ws},
-		tools.PatchLines{WS: ws},
-		tools.ListFiles{WS: ws},
-		tools.MoveFile{WS: ws},
-		tools.RunShell{WS: ws},
-		tools.GrepFiles{WS: ws},
-		tools.StartBackground{WS: ws, Procs: bgProcs},
-		tools.CheckBackground{Procs: bgProcs},
-		tools.StopBackground{Procs: bgProcs},
-		tools.CheckURL{},
-	)
+	subTools := tools.Base(ws, bgProcs)
 	spawnSub := func(role string) *agent.Agent {
 		return agent.New(agent.Config{
 			Client:       client,
 			Tools:        subTools,
 			System:       prompts.WithRole(role),
+			MaxSteps:     12,
 			MaxTokens:    *maxTokens,
 			ContextLimit: contextLimit,
+			SkipVerify:   true,
 			Verify:       verify,
 		})
 	}
 
-	mainTools := agent.NewRegistry(
-		tools.ReadFile{WS: ws},
-		tools.WriteFile{WS: ws},
-		tools.PatchFile{WS: ws},
-		tools.PatchLines{WS: ws},
-		tools.ListFiles{WS: ws},
-		tools.MoveFile{WS: ws},
-		tools.RunShell{WS: ws},
-		tools.GrepFiles{WS: ws},
-		tools.StartBackground{WS: ws, Procs: bgProcs},
-		tools.CheckBackground{Procs: bgProcs},
-		tools.StopBackground{Procs: bgProcs},
-		tools.CheckURL{},
-		tools.AskUser{AskFn: askFn},
-		tools.Delegate{Spawn: spawnSub},
-	)
+	delegate := &tools.Delegate{Spawn: spawnSub}
+	mainTools := tools.Base(ws, bgProcs, tools.AskUser{AskFn: askFn}, delegate)
 
 	a := agent.New(agent.Config{
 		Client:       client,
@@ -198,10 +175,11 @@ func main() {
 		Verify:       verify,
 		OnStep: func(step int, msg llm.Message) {
 			if msg.Content != "" {
-				fmt.Printf("[step %d] %s\n", step, msg.Content)
+				fmt.Printf("[step %d] %s\n", step, agent.TruncateMiddle(msg.Content, *logMax))
 			}
 			for _, tc := range msg.ToolCalls {
-				fmt.Printf("[step %d] -> %s(%s)\n", step, tc.Name, string(tc.Arguments))
+				fmt.Printf("[step %d] -> %s(%s)\n", step, tc.Name,
+					agent.TruncateMiddle(string(tc.Arguments), *logMax))
 			}
 		},
 	})
@@ -242,5 +220,5 @@ func main() {
 		}
 	}
 	fmt.Println("\n=== result ===")
-	fmt.Println(result)
+	fmt.Println(agent.TruncateMiddle(result, *logMax))
 }

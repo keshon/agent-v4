@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"agent-v4/internal/llm"
+	"agent-v4/internal/prompts"
 )
 
 // stubClient returns canned responses in sequence, one per Chat call.
@@ -555,7 +557,7 @@ func TestAgent_VerifyHook_OutputFoldedIntoVerifyMessage(t *testing.T) {
 		Tools:  NewRegistry(),
 		System: "sys",
 		Verify: func(ctx context.Context) (string, bool) {
-			return "FAILED: undefined symbol foo", true
+			return "PASSED\n(no issues)", true
 		},
 	})
 
@@ -565,12 +567,157 @@ func TestAgent_VerifyHook_OutputFoldedIntoVerifyMessage(t *testing.T) {
 
 	found := false
 	for _, m := range client.lastHistory {
-		if strings.Contains(m.Content, "Build/test check result: FAILED: undefined symbol foo") {
+		if strings.Contains(m.Content, "Build/test check result: PASSED") {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatal("expected Verify output to appear in the verify message")
+	}
+}
+
+func TestAgent_VerifyFailed_BlocksPrematureFinish(t *testing.T) {
+	verifyCalls := 0
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done with the code change"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "confirmed correct"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "fixed now"}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "all good"}},
+	}}
+	a := New(Config{
+		Client: client,
+		Tools:  NewRegistry(),
+		System: "sys",
+		Verify: func(ctx context.Context) (string, bool) {
+			verifyCalls++
+			if verifyCalls == 1 {
+				return "FAILED\nundefined: foo", true
+			}
+			return "PASSED\n", true
+		},
+	})
+
+	out, err := a.Run(context.Background(), "task")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if client.calls < 3 {
+		t.Fatalf("calls = %d, want at least 3 (finish blocked after FAILED verify)", client.calls)
+	}
+	if out != "all good" {
+		t.Fatalf("result = %q, want %q", out, "all good")
+	}
+
+	found := false
+	for _, m := range client.lastHistory {
+		if strings.Contains(m.Content, "Fix the issues") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected verify-failed continuation message in history")
+	}
+}
+
+func TestAgent_CompactHistoryAt90Percent(t *testing.T) {
+	client := &usageClient{
+		usages:       []int{950, 960},
+		finalContent: "done",
+	}
+	a := New(Config{
+		Client:           client,
+		Tools:            NewRegistry(echoToolStub{}),
+		System:           "sys",
+		ContextLimit:     1000,
+		CompactKeepSteps: 2,
+		SkipVerify:       true,
+	})
+
+	// Seed history with many prior steps so compaction has something to drop.
+	history := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "task"},
+	}
+	for i := 0; i < 6; i++ {
+		id := fmt.Sprintf("c%d", i)
+		history = append(history,
+			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: id, Name: "echo", Arguments: json.RawMessage(`{}`)}}},
+			llm.Message{Role: llm.RoleTool, ToolCallID: id, Content: "ok"},
+		)
+	}
+
+	if _, err := a.Resume(context.Background(), history, "continue"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	found := false
+	for _, m := range client.lastHistory {
+		if m.Content == prompts.CompactNotice {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected compact notice after crossing 90% context usage")
+	}
+}
+
+// askUserStub blocks until the test supplies an answer via the channel.
+type askUserStub struct {
+	questionCh chan string
+	answer     string
+}
+
+func (a askUserStub) Name() string            { return "ask_user" }
+func (askUserStub) Description() string     { return "ask" }
+func (askUserStub) Mode() ToolMode          { return Exclusive }
+func (askUserStub) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (a askUserStub) Run(_ context.Context, args json.RawMessage) (string, error) {
+	var in struct {
+		Question string `json:"question"`
+	}
+	_ = json.Unmarshal(args, &in)
+	if a.questionCh != nil {
+		a.questionCh <- in.Question
+	}
+	return a.answer, nil
+}
+
+func TestAgent_AskUser_PausesWithUnansweredCall(t *testing.T) {
+	args, _ := json.Marshal(map[string]string{"question": "which db?"})
+	questionCh := make(chan string, 1)
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "q1", Name: "ask_user", Arguments: args},
+		}}},
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "using sqlite"}},
+	}}
+	a := New(Config{
+		Client:     client,
+		Tools:      NewRegistry(askUserStub{questionCh: questionCh, answer: "sqlite"}),
+		System:     "sys",
+		SkipVerify: true,
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := a.Run(context.Background(), "build app"); err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	}()
+
+	select {
+	case q := <-questionCh:
+		if q != "which db?" {
+			t.Errorf("question = %q", q)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ask_user never invoked")
+	}
+	<-done
+
+	if callID, _, ok := PausedOnQuestion(client.lastHistory[:len(client.lastHistory)-1]); ok {
+		_ = callID // history mid-run had unanswered call before tool result appended
 	}
 }
 
@@ -688,6 +835,30 @@ func TestAgent_MixedConcurrentAndExclusive_ExclusiveRunsAfterConcurrentBatch(t *
 	}
 }
 
+func TestAgent_ToolLoop_FiresWhenSameToolRepeatsWithTweakedArgs(t *testing.T) {
+	client := &shellLoopClient{steps: 4, finalContent: "done"}
+	a := New(Config{
+		Client:       client,
+		Tools:        NewRegistry(echoToolStub{name: "run_shell"}),
+		System:       "sys",
+		SkipVerify:   true,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	fired := 0
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleUser && strings.Contains(m.Content, "same tool several steps") {
+			fired++
+		}
+	}
+	if fired != 1 {
+		t.Fatalf("tool loop nudge fired %d times, want exactly 1", fired)
+	}
+}
+
 func TestAgent_SearchFatigue_FiresOnceAfterManyExploratoryStepsWithoutMutation(t *testing.T) {
 	// Reproduces the real failure: many varying grep_files/list_files
 	// calls in a row, none of them errors, none of them exact repeats —
@@ -749,6 +920,28 @@ func TestAgent_SearchFatigue_ResetsOnMutatingSuccess(t *testing.T) {
 			t.Fatalf("unexpected search fatigue nudge when a mutation reset the counter: %q", m.Content)
 		}
 	}
+}
+
+// shellLoopClient issues a run_shell call with varying arguments every
+// step for `steps` steps, then finishes — simulates git log tweak loops.
+type shellLoopClient struct {
+	steps        int
+	finalContent string
+	calls        int
+	lastHistory  []llm.Message
+}
+
+func (c *shellLoopClient) Chat(_ context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	c.lastHistory = req.Messages
+	if c.calls >= c.steps {
+		return llm.ChatResponse{Message: llm.Message{Role: llm.RoleAssistant, Content: c.finalContent}}, nil
+	}
+	c.calls++
+	args, _ := json.Marshal(map[string]string{"command": fmt.Sprintf("git log tweak %d", c.calls)})
+	return llm.ChatResponse{Message: llm.Message{
+		Role:      llm.RoleAssistant,
+		ToolCalls: []llm.ToolCall{{ID: "c", Name: "run_shell", Arguments: args}},
+	}}, nil
 }
 
 // exploringClient issues a grep_files call with varying arguments every

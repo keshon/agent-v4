@@ -1,0 +1,3 @@
+The build/test check failed. Fix the issues using your tools — do not declare done until the check passes. Result:
+
+%s

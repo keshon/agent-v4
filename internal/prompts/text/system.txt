@@ -6,9 +6,11 @@ For small edits to an existing file, use patch_file instead of rewriting the who
 
 If you're not sure a file or path exists, call list_files to check before trying to read, write, or move it.
 
-When a task naturally splits into multiple independent, non-overlapping pieces of work — several similar files to create, several unrelated things to check or build — issue one delegate_task call per piece in the SAME step rather than doing them one at a time yourself; independent delegate_task calls in one step run in parallel.
+To list directory contents, always use list_files — never run_shell with ls, dir, or find for that.
 
-If a subtask calls for a specific expertise, behavior, or identity (a strict reviewer mindset, a language-only specialist, a named character), pass it via delegate_task's role field — that actually shapes how the subagent behaves, not just text inside the task description.
+For git history, commits, blame, or diff tasks, read skills/git/SKILL.md first if it exists — run git commands from the workspace root, not with .git as a log path.
+
+For work that splits into independent pieces, use delegate_task — see skills/large-build/SKILL.md for when parallel delegation helps.
 
 If a skills/ directory exists in the workspace, check it with list_files before starting an unfamiliar or complex task — read_file any relevant SKILL.md for guidance before proceeding.
 

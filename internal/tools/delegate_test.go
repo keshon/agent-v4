@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"agent-v4/internal/agent"
 	"agent-v4/internal/llm"
@@ -19,7 +22,7 @@ func (c stubSubClient) Chat(_ context.Context, _ llm.ChatRequest) (llm.ChatRespo
 
 func TestDelegate_PassesRoleToSpawn(t *testing.T) {
 	var gotRole string
-	d := Delegate{
+	d := &Delegate{
 		Spawn: func(role string) *agent.Agent {
 			gotRole = role
 			return agent.New(agent.Config{
@@ -50,7 +53,7 @@ func TestDelegate_PassesRoleToSpawn(t *testing.T) {
 func TestDelegate_EmptyRoleIsFine(t *testing.T) {
 	var gotRole string
 	called := false
-	d := Delegate{
+	d := &Delegate{
 		Spawn: func(role string) *agent.Agent {
 			called = true
 			gotRole = role
@@ -72,5 +75,50 @@ func TestDelegate_EmptyRoleIsFine(t *testing.T) {
 	}
 	if gotRole != "" {
 		t.Fatalf("role = %q, want empty when not provided", gotRole)
+	}
+}
+
+func TestDelegate_LimitsConcurrentSubagents(t *testing.T) {
+	var active int32
+	var maxActive int32
+
+	d := &Delegate{
+		MaxConcurrent: 2,
+		Spawn: func(role string) *agent.Agent {
+			cur := atomic.AddInt32(&active, 1)
+			defer atomic.AddInt32(&active, -1)
+
+			for {
+				old := atomic.LoadInt32(&maxActive)
+				if cur <= old || atomic.CompareAndSwapInt32(&maxActive, old, cur) {
+					break
+				}
+			}
+
+			time.Sleep(50 * time.Millisecond)
+			return agent.New(agent.Config{
+				Client:     stubSubClient{answer: "done"},
+				Tools:      agent.NewRegistry(),
+				System:     "base",
+				SkipVerify: true,
+			})
+		},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			args, _ := json.Marshal(map[string]string{"task": "work"})
+			if _, err := d.Run(context.Background(), args); err != nil {
+				t.Errorf("Run: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if atomic.LoadInt32(&maxActive) > 2 {
+		t.Fatalf("max concurrent subagents = %d, want <= 2", maxActive)
 	}
 }

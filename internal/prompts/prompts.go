@@ -83,11 +83,17 @@ var (
 	// stop and ask, instead of indefinitely narrowing the same dead end.
 	SearchFatigue = read("search_fatigue.txt")
 
-	// AskUserSent is appended to history as a system note after an
-	// ask_user tool call actually blocks on stdin — it lets the model
-	// know it's paused awaiting a human answer, and the answer will
-	// arrive as the next message.
-	AskUserSent = read("ask_user_sent.txt")
+	// ToolLoop fires once when the same tool is called alone for several
+	// consecutive steps with only small argument changes.
+	ToolLoop = read("tool_loop.txt")
+
+	// CompactNotice is inserted once when history is mechanically
+	// compacted at 90% context usage.
+	CompactNotice = read("compact_notice.txt")
+
+	// VerifyFailedContinue blocks a premature finish when the verify hook
+	// reported FAILED. One %s: the verify output.
+	VerifyFailedContinue = read("verify_failed_continue.txt")
 )
 
 // WithRole returns System with RoleAddendum appended for role, or System

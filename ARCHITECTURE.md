@@ -131,11 +131,13 @@ the wrong tokenizer entirely and would silently under- or over-count.
 Crossing 75%/90% of that ceiling injects a one-time nudge telling the
 model its actual budget and suggesting it wrap up or delegate remaining
 work — informing the model via the prompt, not silently truncating
-history out from under it. Deliberately not doing automatic mechanical
-history compaction yet: deciding what's safe to drop without breaking
-tool_call_id pairing is a bigger, riskier piece of design than "tell the
-model the number and let it decide," which is also what was actually
-asked for. Revisit if nudging alone proves insufficient.
+history out from under it. At 90%, the loop also runs a one-time
+mechanical compaction (`compactHistory` in `internal/agent/compact.go`):
+it drops older assistant-led step groups while keeping the system prompt,
+original user task, and the last `Config.CompactKeepSteps` groups (default
+8). Each dropped group is a whole step — assistant message plus every
+tool result and nudge that followed — so tool_call_id pairing is never
+broken. Set `CompactKeepSteps` to `-1` to disable compaction.
 
 ## Tool scheduling is mode-based, not flat-parallel
 
@@ -240,15 +242,13 @@ Same reasoning as `move_file` vs `ren`/`mv`: shelling out to `findstr` vs
 any host OS, capped at 200 matches so one search can't blow the context
 budget by itself.
 
-## Watch this: state piling up in run()
+## Watch this: state in run()
 
-`run()` now threads six pieces of mutable state through the loop body:
-`stuckSteps`, `verifiedOnce`, `lastSignature`, `warnedThreshold`,
-`lastPromptTokens`, `mutatingSucceeded`. Still readable as named locals
-today. If a seventh cross-cutting concern gets added the same way, that's
-the signal to bundle these into a small `runState` struct instead of
-adding local #7 — not before, since premature structure here is exactly
-the kind of layer this project keeps deciding against elsewhere.
+`run()` threads mutable state through a `runState` struct (`stuckSteps`,
+`verifiedOnce`, `compactedOnce`, `blockFinishDueToVerify`, etc.). If a
+new cross-cutting concern doesn't fit there cleanly, that's the signal to
+split compaction or verify gating into a dedicated helper file — not to
+add local #9 beside the struct.
 
 ## Long-running processes need a different tool, not a bigger timeout
 

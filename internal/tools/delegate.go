@@ -13,6 +13,8 @@ import (
 // "orchestrator" from agent-v3, replaced by one tool: delegation doesn't
 // need its own architecture, just a tool that recursively builds and runs
 // another *agent.Agent.
+const defaultMaxConcurrentDelegates = 3
+
 type Delegate struct {
 	// Spawn builds a fresh subagent for one subtask. role, if non-empty,
 	// is layered onto the subagent's base system prompt rather than
@@ -23,6 +25,11 @@ type Delegate struct {
 	// task-specific tool set — in particular, without Delegate itself, so
 	// a task can't recurse into subagents forever.
 	Spawn func(role string) *agent.Agent
+
+	// MaxConcurrent caps parallel delegate_task calls. Zero means 3.
+	MaxConcurrent int
+
+	sem chan struct{}
 }
 
 func (Delegate) Name() string { return "delegate_task" }
@@ -52,7 +59,19 @@ func (Delegate) Schema() json.RawMessage {
 	}`)
 }
 
-func (d Delegate) Run(ctx context.Context, args json.RawMessage) (string, error) {
+func (d *Delegate) semaphore() chan struct{} {
+	if d.sem != nil {
+		return d.sem
+	}
+	capacity := d.MaxConcurrent
+	if capacity <= 0 {
+		capacity = defaultMaxConcurrentDelegates
+	}
+	d.sem = make(chan struct{}, capacity)
+	return d.sem
+}
+
+func (d *Delegate) Run(ctx context.Context, args json.RawMessage) (string, error) {
 	var in struct {
 		Task string `json:"task"`
 		Role string `json:"role"`
@@ -60,6 +79,10 @@ func (d Delegate) Run(ctx context.Context, args json.RawMessage) (string, error)
 	if err := json.Unmarshal(args, &in); err != nil {
 		return "", fmt.Errorf("bad arguments: %w", err)
 	}
+	sem := d.semaphore()
+	sem <- struct{}{}
+	defer func() { <-sem }()
+
 	sub := d.Spawn(in.Role)
 	return sub.Run(ctx, in.Task)
 }

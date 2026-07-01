@@ -19,6 +19,10 @@ func TestAllPromptsLoadNonEmpty(t *testing.T) {
 		"StuckRepeating":    StuckRepeating,
 		"BudgetWarning":     BudgetWarning,
 		"BudgetNotice":      BudgetNotice,
+		"SearchFatigue":     SearchFatigue,
+		"ToolLoop":          ToolLoop,
+		"CompactNotice":     CompactNotice,
+		"VerifyFailedContinue": VerifyFailedContinue,
 	}
 	for name, val := range all {
 		if val == "" {

@@ -28,10 +28,13 @@ func (RunShell) Mode() agent.ToolMode { return agent.Exclusive }
 func (RunShell) Description() string {
 	if runtime.GOOS == "windows" {
 		return "Run a command inside the workspace via cmd.exe (use Windows commands: " +
-			"dir, ren, copy, move, del) and return its combined output."
+			"ren, copy, move, del, git, go, npm, etc). For listing directory contents use " +
+			"list_files instead of dir. Return its combined output."
 	}
 	return "Run a command inside the workspace via sh (use POSIX commands: " +
-		"ls, mv, cp, rm) and return its combined output."
+		"mv, cp, rm, git, go, npm, etc). For listing directory contents use " +
+		"list_files instead of ls. For searching file text use grep_files " +
+		"instead of grep. Return combined stdout+stderr."
 }
 func (RunShell) Schema() json.RawMessage {
 	return json.RawMessage(`{

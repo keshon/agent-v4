@@ -1,0 +1,2 @@
+Hello from eval fixtures.
+Rename me to goodbye.txt to pass prompt 04.

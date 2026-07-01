@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"agent-v4/internal/llm"
 )
@@ -68,8 +69,15 @@ func NewRegistry(tools ...Tool) *Registry {
 
 // Defs returns the tool definitions to hand to the LLM client.
 func (r *Registry) Defs() []llm.ToolDef {
-	defs := make([]llm.ToolDef, 0, len(r.tools))
-	for _, t := range r.tools {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	defs := make([]llm.ToolDef, 0, len(names))
+	for _, name := range names {
+		t := r.tools[name]
 		defs = append(defs, llm.ToolDef{
 			Name:        t.Name(),
 			Description: t.Description(),

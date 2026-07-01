@@ -7,6 +7,9 @@ no prose padding, no theory.
 Convention: `skills/<name>/SKILL.md`. Discovered via `list_files` +
 `read_file` — no special tool needed (see system prompt).
 
+Baseline tool discipline lives in the system prompt. Skills cover
+task-specific workflows (git, dev servers, large builds, language quirks).
+
 Rules for writing one:
 - Lead with a checklist, not an essay.
 - Name this agent's actual tools (`patch_file`, `move_file`, `run_shell`,
