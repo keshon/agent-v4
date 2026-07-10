@@ -1,0 +1,5 @@
+Your plan was rejected by mechanical validation for these reasons:
+
+%s
+
+Produce a corrected JSON plan in the same format. Fix every listed problem; change nothing that wasn't flagged.

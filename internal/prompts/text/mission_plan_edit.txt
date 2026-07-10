@@ -1,0 +1,5 @@
+A human reviewed your plan and rejected it with this note:
+
+%s
+
+Produce a corrected JSON plan in the same format, taking the note into account.

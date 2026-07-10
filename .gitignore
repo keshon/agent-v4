@@ -4,3 +4,4 @@ temp/
 *.exe
 dump.txt
 dump.bat
+agent-debug.log

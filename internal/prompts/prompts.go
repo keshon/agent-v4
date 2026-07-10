@@ -94,6 +94,32 @@ var (
 	// VerifyFailedContinue blocks a premature finish when the verify hook
 	// reported FAILED. One %s: the verify output.
 	VerifyFailedContinue = read("verify_failed_continue.txt")
+
+	// MissionPlan is the system prompt for the mission planning call —
+	// tool-free, grammar-constrained JSON output.
+	MissionPlan = read("mission_plan.txt")
+
+	// MissionPlanTask is the user message for the planning call. Two %s:
+	// the verbatim task, the workspace file listing.
+	MissionPlanTask = read("mission_plan_task.txt")
+
+	// MissionPlanRetry asks for a corrected plan after Go-side validation
+	// rejected the first one. One %s: the joined validation errors.
+	MissionPlanRetry = read("mission_plan_retry.txt")
+
+	// MissionPlanEdit asks for a corrected plan after the human approval
+	// gate rejected it with a note. One %s: the note.
+	MissionPlanEdit = read("mission_plan_edit.txt")
+
+	// MissionWorker is the system prompt for a mission subtask worker —
+	// the baseline tool rules plus stay-in-scope discipline.
+	MissionWorker = read("mission_worker.txt")
+
+	// MissionSeed is the compiled first user message for a subtask
+	// worker. Nine %s, in order: mission task, rendered ledger, subtask
+	// id, subtask title, goal, acceptance bullets, files involved,
+	// rendered check, workspace file listing.
+	MissionSeed = read("mission_seed.txt")
 )
 
 // WithRole returns System with RoleAddendum appended for role, or System

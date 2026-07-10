@@ -51,6 +51,23 @@ type ChatRequest struct {
 	// large generations (e.g. a full HTML+CSS+JS file in one write_file
 	// call) to cut off mid-JSON — see Config.MaxTokens in package agent.
 	MaxTokens int
+
+	// Grammar, if set, constrains this one response with a GBNF grammar,
+	// overriding any client-level default grammar. Used for tool-free
+	// structured-output calls (plan generation, verdicts) where the model
+	// must emit JSON matching a fixed schema — a weak model asked for
+	// free-form JSON reliably drifts; a grammar makes drift impossible at
+	// the token level. Only meaningful on backends that accept a "grammar"
+	// field (koboldcpp/llama.cpp); others ignore it.
+	Grammar string
+
+	// Temperature, if > 0, is sent to the backend for this call. Zero
+	// means "omit the field" and leave the backend's own default sampling
+	// untouched — there is deliberately no way to request a literal 0.0,
+	// because greedy sampling makes grammar-constrained weak models loop
+	// on repeated tokens. Structured calls use a low value (~0.3) to keep
+	// output stable without inviting that failure.
+	Temperature float64
 }
 
 // Usage reports real token counts from the backend's own tokenizer — not

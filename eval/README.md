@@ -77,6 +77,7 @@ steps for a weak model (see each prompt), no regression traps in the table.
 | 12 | `prompts/12-ask-user.md` | ambiguous spec → ask_user |
 | 13 | `prompts/13-dev-server-trap.md` | run_shell vs start_background |
 | 14 | `prompts/14-multi-file-parallel.md` | delegate_task in one step (stretch) |
+| 15 | `prompts/15-mission-smoke.md` | mission mode: plan grammar, workers, checks |
 
 ## Fixtures
 

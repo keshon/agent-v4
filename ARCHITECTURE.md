@@ -1,6 +1,6 @@
 # agent-v4 architecture
 
-One loop, four packages. No "policy" layer, no "orchestrate" layer sitting
+One loop, five packages. No "policy" layer, no "orchestrate" layer sitting
 next to the agent doing the same job twice.
 
 ```
@@ -16,6 +16,11 @@ internal/tools       — Concrete tools: filesystem, shell, delegation.
                        Delegation is just a tool that builds and runs
                        another Agent — not a separate architecture.
 
+internal/mission     — The -mission harness: plan → execute → verify as a
+                       deterministic state machine over the same Agent
+                       loop. See "Mission mode" below for why this is the
+                       documented exception to rule #1, not a violation.
+
 internal/workspace   — The only thing allowed to touch the filesystem
                        directly. Tools go through it; nothing else does.
 ```
@@ -24,7 +29,11 @@ internal/workspace   — The only thing allowed to touch the filesystem
 
 1. **One loop.** If you're tempted to add a second "planner" or
    "orchestrator" next to `agent.Agent`, don't — extend the loop itself or
-   add a tool instead.
+   add a tool instead. *The documented exception is `internal/mission`
+   (see "Mission mode" below): it hit exactly the concrete case this rule
+   reserved — a complex multi-file task the reactive loop handles badly —
+   and it orchestrates by reusing the loop (`agent.New` per worker), never
+   by duplicating its decisions.*
 2. **Backend quirks stay in `internal/llm`.** If a local model does
    something weird (malformed tool-call JSON, ignored schema, whatever),
    fix it in the Client implementation, not in the loop.
@@ -40,12 +49,69 @@ internal/workspace   — The only thing allowed to touch the filesystem
 
 - **Persistence / run history.** Add a small `internal/observe` package
   later if you actually need to replay runs — not before you hit that need.
-- **Planning ahead of execution.** The loop is reactive (think → act →
-  think) on purpose. Add explicit upfront planning only if you hit a
-  concrete case the reactive loop handles badly — don't pre-build it.
 - **Multiple backends.** When you actually need a second one, add a second
   `internal/llm/*.go` file implementing `Client`. Don't build an abstraction
   for backends you don't have yet.
+
+## Mission mode — why upfront planning finally got built
+
+The original rule here was "the loop is reactive on purpose; add explicit
+upfront planning only if you hit a concrete case the reactive loop handles
+badly — don't pre-build it." The concrete case arrived: any genuinely
+complex multi-file task ("build a web Doom-style FPS"). The failure isn't
+one bug — it's structural. Every defensive mechanism below (leak
+detection, stuck detection, search fatigue, compaction, the verify gate)
+patches the same root cause: **a weak model asked to be its own executive
+over an ever-growing append-only transcript.** By step 40 the original
+goal is buried under tool output, free context is near zero, and no nudge
+can restore coherence. That's not a reasoning bug to patch — it's a
+capability ceiling to design around.
+
+`internal/mission` moves the executive function into the harness:
+
+- **The ledger is the source of truth, not the conversation.** A
+  `Mission` (task verbatim, flat subtask list with acceptance criteria and
+  typed checks) lives in `.agent/tasks/<id>/mission.json`, saved atomically
+  after every state change. Workers see a rendering of it; no worker ever
+  sees another worker's transcript.
+- **Phases are decided in Go, not by the model.** plan → execute → verify,
+  a `switch` in `Runner.Run`. The model fills in content (a plan, a
+  subtask's work); the harness decides what happens next.
+- **Plan generation is decision-narrowed.** A tool-free `Chat` call with a
+  per-request GBNF grammar (`mission.PlanGrammar`) — the model *cannot*
+  emit anything but schema-shaped JSON. Grammar handles syntax; a Go
+  validator handles structure (no echo-checks, no hallucinated existing
+  paths); the human approval gate handles semantics. Three cheap layers,
+  each catching what the previous can't. Grammar-constrained calls carry
+  no tools, so the koboldcpp grammar×tools interaction question (see
+  "Grammar as a lever") never arises.
+- **Each subtask runs in a fresh worker** — `agent.New(...)`, the same
+  loop with all its detectors, exactly like `delegate_task` spawns
+  subagents. The seed is compiled from the ledger (`mission.CompileSeed`):
+  task verbatim, plan status, this subtask's goal/acceptance, file hints ∪
+  mission-wide mutated paths. No file contents inlined — workers have read
+  tools; context is a weak model's scarcest resource.
+- **Completed work is recorded as measured fact.** Which files a worker
+  actually wrote comes from `agent.RunReport` (parsed from successful
+  mutating calls), never from the model's claims; whether the work is done
+  comes from the subtask's declared check (`file_exists`/`shell`/`http`),
+  run mechanically by the harness. This is `VerifyZeroWrites` doctrine
+  promoted from a nudge to the data model.
+- **Failure is loud and fully reported.** A failed check fails the mission
+  with every recorded fact in the report (bounded fix-loops and replanning
+  are the planned next stage). FAILED-with-facts beats fake success.
+
+What was deliberately **not** built: rolling summarization (a weak model
+summarizing its own history is where acceptance criteria silently die —
+fresh workers make it unnecessary; the one-shot compaction stays as the
+in-worker safety net), model-written outcome summaries (mechanical facts
+instead), nested milestone→subtask plans (two-level JSON is too hard;
+`milestone` is a flat label), and `delegate_task` inside workers (the
+mission runner *is* the decomposition — no recursion).
+
+Direct mode (`agent "task"`) is unchanged and remains the default; mission
+mode is opt-in via `-mission` and worth it only for tasks big enough to
+amortize the planning call.
 
 ## Two kinds of bug — don't treat them the same way
 

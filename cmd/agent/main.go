@@ -13,14 +13,13 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
 	"agent-v4/internal/agent"
 	"agent-v4/internal/llm"
+	"agent-v4/internal/mission"
 	"agent-v4/internal/prompts"
 	"agent-v4/internal/tools"
 	"agent-v4/internal/workspace"
@@ -45,11 +44,30 @@ func main() {
 		"as fact instead of trusting the model's own claim that the code works. Empty disables this.")
 	logMax := flag.Int("log-max", 300, "max characters per line in step console output; "+
 		"long text is truncated in the middle (head ... tail). 0 = no limit")
+	missionMode := flag.Bool("mission", false, "run the task as a mission: an upfront model-generated "+
+		"plan (approved by you), then one fresh-context worker per subtask, each verified mechanically. "+
+		"For complex multi-file tasks a weak model can't hold in its head; simple tasks are better off "+
+		"without it")
+	yes := flag.Bool("yes", false, "skip the mission plan approval gate and run the plan as generated")
 	flag.Parse()
 
 	task := strings.Join(flag.Args(), " ")
 	if task == "" && *resume == "" {
 		log.Fatal(`usage: agent [flags] "task description"  (or  agent -resume <state.json> [-answer "..."])`)
+	}
+
+	// A -resume target whose directory holds mission.json is a mission
+	// resume, whatever the path points at (the dir itself, mission.json,
+	// or a worker state file) — direct-mode resume stays the fallback.
+	missionDir := ""
+	if *resume != "" {
+		cand := *resume
+		if info, err := os.Stat(cand); err != nil || !info.IsDir() {
+			cand = filepath.Dir(cand)
+		}
+		if mission.Exists(cand) {
+			missionDir = cand
+		}
 	}
 
 	// Every run snapshots its history to disk after each step, so a crash
@@ -60,8 +78,14 @@ func main() {
 	} else {
 		sum := sha1.Sum([]byte(task + time.Now().String()))
 		taskID := hex.EncodeToString(sum[:])[:8]
-		stateFile = filepath.Join(".agent", "tasks", taskID, "state.json")
-		fmt.Printf("task id: %s (resume with -resume %s)\n", taskID, stateFile)
+		taskDir := filepath.Join(".agent", "tasks", taskID)
+		stateFile = filepath.Join(taskDir, "state.json")
+		if *missionMode {
+			missionDir = taskDir
+			fmt.Printf("mission id: %s (resume with -resume %s)\n", taskID, taskDir)
+		} else {
+			fmt.Printf("task id: %s (resume with -resume %s)\n", taskID, stateFile)
+		}
 	}
 
 	ws, err := workspace.New(*root)
@@ -95,22 +119,12 @@ func main() {
 		fmt.Printf("context window: %d tokens\n", contextLimit)
 	}
 
-	// Subagents get the same client and workspace but no Delegate tool,
-	// so a task can't recurse into itself forever.
-	// Reuses the same OS-aware shell choice as tools.RunShell, but lives
-	// here (not in internal/agent) since agent must not depend on tools —
-	// tools already depends on agent for Delegate's Spawn type.
+	// Reuses mission.RunShellCommand for the same OS-aware shell choice as
+	// tools.RunShell and mission shell checks — one exec shape everywhere.
 	var verify func(ctx context.Context) (string, bool)
 	if *verifyCmd != "" {
 		verify = func(ctx context.Context) (string, bool) {
-			var cmd *exec.Cmd
-			if runtime.GOOS == "windows" {
-				cmd = exec.CommandContext(ctx, "cmd", "/C", *verifyCmd)
-			} else {
-				cmd = exec.CommandContext(ctx, "sh", "-c", *verifyCmd)
-			}
-			cmd.Dir = ws.Root()
-			out, err := cmd.CombinedOutput()
+			out, err := mission.RunShellCommand(ctx, *verifyCmd, ws.Root())
 			status := "PASSED"
 			if err != nil {
 				status = "FAILED"
@@ -124,6 +138,23 @@ func main() {
 	// processes — a process started by one half of the conversation
 	// should be checkable/stoppable from the other.
 	bgProcs := tools.NewBackgroundProcesses()
+
+	if missionDir != "" {
+		runMission(ctx, missionParams{
+			client:       client,
+			ws:           ws,
+			procs:        bgProcs,
+			dir:          missionDir,
+			task:         task,
+			resuming:     *resume != "",
+			contextLimit: contextLimit,
+			maxTokens:    *maxTokens,
+			logMax:       *logMax,
+			verifyCmd:    *verifyCmd,
+			autoApprove:  *yes,
+		})
+		return
+	}
 
 	// ask_user blocks on stdin inside the tool. State is snapshotted by
 	// the agent loop after the assistant message (with the unanswered tool
@@ -221,4 +252,98 @@ func main() {
 	}
 	fmt.Println("\n=== result ===")
 	fmt.Println(agent.TruncateMiddle(result, *logMax))
+}
+
+type missionParams struct {
+	client       llm.Client
+	ws           *workspace.Workspace
+	procs        *tools.BackgroundProcesses
+	dir          string
+	task         string
+	resuming     bool
+	contextLimit int
+	maxTokens    int
+	logMax       int
+	verifyCmd    string
+	autoApprove  bool
+}
+
+// runMission is the -mission entry point: harness-owned plan → execute →
+// verify instead of one long reactive conversation. The interaction
+// point with the human is the plan approval gate; workers themselves
+// never ask questions.
+func runMission(ctx context.Context, p missionParams) {
+	var m *mission.Mission
+	if p.resuming {
+		var err error
+		m, err = mission.Load(p.dir)
+		if err != nil {
+			log.Fatalf("resume mission: %v", err)
+		}
+		progress := ""
+		if len(m.Subtasks) > 0 {
+			progress = fmt.Sprintf(", subtask %d/%d", m.Cursor+1, len(m.Subtasks))
+		}
+		fmt.Printf("resuming mission %s (phase: %s%s)\n", m.ID, m.Phase, progress)
+	} else {
+		m = &mission.Mission{ID: filepath.Base(p.dir), Task: p.task, Phase: mission.PhasePlan}
+		if err := m.Save(p.dir); err != nil {
+			log.Fatalf("create mission: %v", err)
+		}
+	}
+
+	// The approval gate is the cheapest, strongest defense against a
+	// weak model's garbage plans: a human reads it before anything runs.
+	var approve func(string) (bool, string)
+	if !p.autoApprove {
+		reader := bufio.NewReader(os.Stdin)
+		approve = func(rendered string) (bool, string) {
+			fmt.Println("\n=== proposed plan ===")
+			fmt.Println(rendered)
+			fmt.Print("\napprove? [y]es / [n]o / or type a revision note\n> ")
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return false, ""
+			}
+			line = strings.TrimSpace(line)
+			switch strings.ToLower(line) {
+			case "y", "yes":
+				return true, ""
+			case "n", "no":
+				return false, ""
+			default:
+				return false, line
+			}
+		}
+	}
+
+	runner := &mission.Runner{
+		Client:       p.client,
+		WS:           p.ws,
+		Dir:          p.dir,
+		Procs:        p.procs,
+		ContextLimit: p.contextLimit,
+		MaxTokens:    p.maxTokens,
+		ApprovePlan:  approve,
+		VerifyCmd:    p.verifyCmd,
+		OnStep: func(subID string, step int, msg llm.Message) {
+			if msg.Content != "" {
+				fmt.Printf("[%s step %d] %s\n", subID, step, agent.TruncateMiddle(msg.Content, p.logMax))
+			}
+			for _, tc := range msg.ToolCalls {
+				fmt.Printf("[%s step %d] -> %s(%s)\n", subID, step, tc.Name,
+					agent.TruncateMiddle(string(tc.Arguments), p.logMax))
+			}
+		},
+		OnEvent: func(format string, args ...any) {
+			fmt.Printf("[mission] "+format+"\n", args...)
+		},
+	}
+
+	report, err := runner.Run(ctx, m)
+	fmt.Println("\n=== mission report ===")
+	fmt.Println(report)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
 }

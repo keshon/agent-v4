@@ -23,6 +23,12 @@ func TestAllPromptsLoadNonEmpty(t *testing.T) {
 		"ToolLoop":          ToolLoop,
 		"CompactNotice":     CompactNotice,
 		"VerifyFailedContinue": VerifyFailedContinue,
+		"MissionPlan":       MissionPlan,
+		"MissionPlanTask":   MissionPlanTask,
+		"MissionPlanRetry":  MissionPlanRetry,
+		"MissionPlanEdit":   MissionPlanEdit,
+		"MissionWorker":     MissionWorker,
+		"MissionSeed":       MissionSeed,
 	}
 	for name, val := range all {
 		if val == "" {
@@ -31,6 +37,12 @@ func TestAllPromptsLoadNonEmpty(t *testing.T) {
 		if strings.HasSuffix(val, "\n") {
 			t.Errorf("%s has a trailing newline, want trimmed", name)
 		}
+	}
+}
+
+func TestMissionSeed_PlaceholderCountMatchesCompiler(t *testing.T) {
+	if got := strings.Count(MissionSeed, "%s"); got != 9 {
+		t.Fatalf("MissionSeed has %d %%s placeholders, want 9 — mission.CompileSeed passes exactly nine", got)
 	}
 }
 

@@ -105,7 +105,42 @@ type Agent struct {
 	// LastRunMutations counts successful MutatingTools calls from the
 	// most recent completed run. Set when Run/Resume returns; readable by
 	// delegate_task to report subagent filesystem changes to the parent.
+	// (Unlike RunReport.MutatedPaths, this also counts writes made by
+	// delegated subagents, via the DELEGATE result header.)
 	LastRunMutations int
+
+	report RunReport
+}
+
+// RunReport is what a harness can learn about a finished run without
+// trusting anything the model said about itself: which files its own
+// mutating tool calls actually touched, how many steps it took, what the
+// final message was. Populated by run() as measured fact — a mission
+// runner records these into its ledger instead of asking a weak model to
+// summarize its own work, which is exactly where fake "I saved the file"
+// claims come from.
+type RunReport struct {
+	// Steps is how many model round-trips the run performed.
+	Steps int
+
+	// MutatedPaths lists the workspace paths of successful MutatingTools
+	// calls made directly by this agent (path/from/to arguments), in
+	// first-touch order, deduplicated. Subagent writes are not included —
+	// a parent that needs those reads the DELEGATE result header.
+	MutatedPaths []string
+
+	// Final is the model's final answer text ("" if the run errored out).
+	Final string
+
+	// LastPromptTokens is the backend-reported prompt size of the last
+	// completed call — how full the context actually got.
+	LastPromptTokens int
+}
+
+// Report returns measured facts about the most recent Run/Resume,
+// including a partially filled report for a run that errored mid-way.
+func (a *Agent) Report() RunReport {
+	return a.report
 }
 
 func New(cfg Config) *Agent {
@@ -226,11 +261,13 @@ type runState struct {
 	verifiedOnce, searchFatigueWarned, compactedOnce, blockFinishDueToVerify, toolLoopWarned bool
 	emptyFinishRetried                                                                 bool
 	lastSignature, verifyFailedOutput, lastSingleTool string
+	mutatedPaths                                      []string
 }
 
 func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) {
 	var st runState
 	a.LastRunMutations = 0
+	a.report = RunReport{}
 
 	for step := 0; step < a.cfg.MaxSteps; step++ {
 		resp, err := a.cfg.Client.Chat(ctx, llm.ChatRequest{
@@ -249,6 +286,8 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		if resp.Usage.PromptTokens > 0 {
 			st.lastPromptTokens = resp.Usage.PromptTokens
 		}
+		a.report.Steps = step + 1
+		a.report.LastPromptTokens = st.lastPromptTokens
 		a.maybeCompact(&history, resp.Usage, &st)
 		a.saveState(history)
 
@@ -317,6 +356,8 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 				}
 			}
 			a.LastRunMutations = st.mutatingSucceeded
+			a.report.MutatedPaths = st.mutatedPaths
+			a.report.Final = resp.Message.Content
 			return resp.Message.Content, nil
 		}
 
@@ -380,6 +421,11 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 				progressed = true
 				if containsStr(a.cfg.MutatingTools, call.Name) {
 					st.mutatingSucceeded++
+					for _, p := range mutatedPathsFromCall(call.Arguments) {
+						if !containsStr(st.mutatedPaths, p) {
+							st.mutatedPaths = append(st.mutatedPaths, p)
+						}
+					}
 				}
 				if call.Name == "delegate_task" {
 					if m := parseDelegateMutations(content); m > 0 {
@@ -432,7 +478,31 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		}
 	}
 
+	a.LastRunMutations = st.mutatingSucceeded
+	a.report.MutatedPaths = st.mutatedPaths
 	return "", fmt.Errorf("reached max steps (%d) without finishing", a.cfg.MaxSteps)
+}
+
+// mutatedPathsFromCall pulls workspace paths out of a mutating tool
+// call's arguments. The project's file tools name them path (write_file,
+// patch_file, patch_lines) or from/to (move_file); a mutating tool with
+// none of these contributes nothing rather than guessing.
+func mutatedPathsFromCall(args json.RawMessage) []string {
+	var fields struct {
+		Path string `json:"path"`
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if json.Unmarshal(args, &fields) != nil {
+		return nil
+	}
+	var out []string
+	for _, p := range []string{fields.Path, fields.From, fields.To} {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // parseDelegateMutations reads the structured DELEGATE header from a

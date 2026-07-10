@@ -1,0 +1,18 @@
+## Mission
+%s
+
+## Plan status
+%s
+
+## Your subtask (%s: %s)
+%s
+
+Acceptance criteria — done means ALL of these are true:
+%s
+
+Files likely involved: %s
+
+After you finish, the harness will verify your work mechanically: %s
+
+## Workspace files
+%s

@@ -101,11 +101,12 @@ type wireTool struct {
 }
 
 type wireRequest struct {
-	Model     string        `json:"model"`
-	Messages  []wireMessage `json:"messages"`
-	Tools     []wireTool    `json:"tools,omitempty"`
-	Grammar   string        `json:"grammar,omitempty"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
+	Model       string        `json:"model"`
+	Messages    []wireMessage `json:"messages"`
+	Tools       []wireTool    `json:"tools,omitempty"`
+	Grammar     string        `json:"grammar,omitempty"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
 }
 
 type wireResponse struct {
@@ -134,7 +135,13 @@ func (c *KoboldClient) logDebug(format string, args ...any) {
 }
 
 func (c *KoboldClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
-	wreq := wireRequest{Model: c.model, Grammar: c.Grammar, MaxTokens: req.MaxTokens}
+	// A per-request grammar (structured plan/verdict calls) wins over the
+	// client-level default; both empty means no constraint at all.
+	grammar := c.Grammar
+	if req.Grammar != "" {
+		grammar = req.Grammar
+	}
+	wreq := wireRequest{Model: c.model, Grammar: grammar, MaxTokens: req.MaxTokens, Temperature: req.Temperature}
 
 	for _, m := range req.Messages {
 		wm := wireMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}
