@@ -120,6 +120,39 @@ var (
 	// id, subtask title, goal, acceptance bullets, files involved,
 	// rendered check, workspace file listing.
 	MissionSeed = read("mission_seed.txt")
+
+	// MissionFixSeed is the compiled first user message for a fix worker
+	// after a check failure. Ten %s, in order: mission task, rendered
+	// ledger, subtask id, title, goal, acceptance bullets, rendered
+	// check, the check's actual output, files touched by prior attempts,
+	// workspace file listing.
+	MissionFixSeed = read("mission_fix_seed.txt")
+
+	// MissionReplan is the user message for a replan call after a
+	// subtask exhausted its fix attempts (or final verify regressed).
+	// Four %s: task, execution record, reason, workspace file listing.
+	MissionReplan = read("mission_replan.txt")
+
+	// MissionMapAnnotate is the system prompt for the read-only
+	// exploration worker that annotates the mechanical codebase map.
+	MissionMapAnnotate = read("mission_map_annotate.txt")
+
+	// MissionMapAnnotateTask is its user message. Two %s: the mission
+	// task, the mechanical map.
+	MissionMapAnnotateTask = read("mission_map_annotate_task.txt")
+
+	// MissionReview is the system prompt for the read-only review worker
+	// that inspects a finished mission for whole-task gaps.
+	MissionReview = read("mission_review.txt")
+
+	// MissionReviewTask is its user message. Three %s: task, rendered
+	// plan, rendered execution record.
+	MissionReviewTask = read("mission_review_task.txt")
+
+	// MissionVerdict narrows a reviewer's free-text report to an
+	// ok/gaps decision (sent with the decision grammar). One %s: the
+	// report.
+	MissionVerdict = read("mission_verdict.txt")
 )
 
 // WithRole returns System with RoleAddendum appended for role, or System

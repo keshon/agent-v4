@@ -29,6 +29,13 @@ func TestAllPromptsLoadNonEmpty(t *testing.T) {
 		"MissionPlanEdit":   MissionPlanEdit,
 		"MissionWorker":     MissionWorker,
 		"MissionSeed":       MissionSeed,
+		"MissionFixSeed":    MissionFixSeed,
+		"MissionReplan":     MissionReplan,
+		"MissionMapAnnotate":     MissionMapAnnotate,
+		"MissionMapAnnotateTask": MissionMapAnnotateTask,
+		"MissionReview":     MissionReview,
+		"MissionReviewTask": MissionReviewTask,
+		"MissionVerdict":    MissionVerdict,
 	}
 	for name, val := range all {
 		if val == "" {
@@ -43,6 +50,15 @@ func TestAllPromptsLoadNonEmpty(t *testing.T) {
 func TestMissionSeed_PlaceholderCountMatchesCompiler(t *testing.T) {
 	if got := strings.Count(MissionSeed, "%s"); got != 9 {
 		t.Fatalf("MissionSeed has %d %%s placeholders, want 9 — mission.CompileSeed passes exactly nine", got)
+	}
+	if got := strings.Count(MissionFixSeed, "%s"); got != 10 {
+		t.Fatalf("MissionFixSeed has %d %%s placeholders, want 10 — mission.CompileFixSeed passes exactly ten", got)
+	}
+	if got := strings.Count(MissionReplan, "%s"); got != 4 {
+		t.Fatalf("MissionReplan has %d %%s placeholders, want 4", got)
+	}
+	if got := strings.Count(MissionReviewTask, "%s"); got != 3 {
+		t.Fatalf("MissionReviewTask has %d %%s placeholders, want 3", got)
 	}
 }
 

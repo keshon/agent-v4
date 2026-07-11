@@ -101,6 +101,11 @@ type Mission struct {
 	// (from agent.RunReport, not model claims), mission-wide and
 	// deduplicated — later workers get it as "files likely involved".
 	Mutated []string `json:"mutated,omitempty"`
+
+	// Notes are mission-level observations for the final report — e.g.
+	// the review stage's verdict, or gaps it flagged that no replan
+	// budget remained to address.
+	Notes []string `json:"notes,omitempty"`
 }
 
 const fileName = "mission.json"
@@ -179,23 +184,29 @@ func (m *Mission) RenderLedger() string {
 func (m *Mission) RenderPlan() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Task: %s\n\n", m.Task)
+	renderSubtasks(&b, m.Subtasks)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderSubtasks writes the detailed subtask view used by RenderPlan and
+// by the replan approval gate (which renders only the new subtasks).
+func renderSubtasks(b *strings.Builder, subs []Subtask) {
 	milestone := ""
-	for _, s := range m.Subtasks {
+	for _, s := range subs {
 		if s.Milestone != milestone {
 			milestone = s.Milestone
-			fmt.Fprintf(&b, "== %s ==\n", milestone)
+			fmt.Fprintf(b, "== %s ==\n", milestone)
 		}
-		fmt.Fprintf(&b, "%s: %s\n", s.ID, s.Title)
-		fmt.Fprintf(&b, "   goal: %s\n", s.Goal)
+		fmt.Fprintf(b, "%s: %s\n", s.ID, s.Title)
+		fmt.Fprintf(b, "   goal: %s\n", s.Goal)
 		for _, a := range s.Acceptance {
-			fmt.Fprintf(&b, "   accept: %s\n", a)
+			fmt.Fprintf(b, "   accept: %s\n", a)
 		}
 		if len(s.FilesHint) > 0 {
-			fmt.Fprintf(&b, "   files: %s\n", strings.Join(s.FilesHint, ", "))
+			fmt.Fprintf(b, "   files: %s\n", strings.Join(s.FilesHint, ", "))
 		}
-		fmt.Fprintf(&b, "   check: %s\n", s.Check.Render())
+		fmt.Fprintf(b, "   check: %s\n", s.Check.Render())
 	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // RenderReport is the honest end-of-mission report: every subtask, its
@@ -210,6 +221,9 @@ func (m *Mission) RenderReport() string {
 		for _, f := range s.Facts {
 			fmt.Fprintf(&b, "   %s\n", f)
 		}
+	}
+	for _, n := range m.Notes {
+		fmt.Fprintf(&b, "note: %s\n", n)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

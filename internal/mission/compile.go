@@ -116,6 +116,38 @@ func CompileSeed(m *Mission, sub *Subtask, listing string) string {
 	)
 }
 
+// CompileFixSeed builds a fix worker's first user message after a check
+// failure. The difference from a normal seed is all evidence: the check
+// that failed with its real output (measured, not paraphrased), and the
+// files previous attempts actually touched — "the bug is almost certainly
+// in one of these". checkOutput arrives already truncated by the caller.
+func CompileFixSeed(m *Mission, sub *Subtask, checkOutput, listing string) string {
+	acceptance := "- (none declared)"
+	if len(sub.Acceptance) > 0 {
+		acceptance = "- " + strings.Join(sub.Acceptance, "\n- ")
+	}
+	files := unionPaths(sub.FilesHint, m.Mutated)
+	filesLine := "(none recorded — inspect the workspace)"
+	if len(files) > 0 {
+		filesLine = strings.Join(files, ", ")
+	}
+	if strings.TrimSpace(checkOutput) == "" {
+		checkOutput = "(no output)"
+	}
+
+	return fmt.Sprintf(prompts.MissionFixSeed,
+		m.Task,
+		m.RenderLedger(),
+		sub.ID, sub.Title,
+		strings.TrimSpace(sub.Goal),
+		acceptance,
+		sub.Check.Render(),
+		checkOutput,
+		filesLine,
+		listing,
+	)
+}
+
 func unionPaths(a, b []string) []string {
 	seen := make(map[string]bool)
 	var out []string

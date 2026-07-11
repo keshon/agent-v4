@@ -49,6 +49,9 @@ func newRunner(t *testing.T, client llm.Client) (*Runner, string) {
 		WS:     ws,
 		Dir:    dir,
 		Procs:  tools.NewBackgroundProcesses(),
+		// Most tests script an exact call sequence; the review stage has
+		// its own dedicated tests below.
+		SkipReview: true,
 	}, dir
 }
 
@@ -188,6 +191,340 @@ func TestRunner_ApprovalGate_EditNoteTriggersOneRevision(t *testing.T) {
 	}
 	if m.Phase != PhaseDone {
 		t.Fatalf("Phase = %s, want done", m.Phase)
+	}
+}
+
+func TestRunner_FixLoop_ConvergesOnSecondAttempt(t *testing.T) {
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		text("I created index.html and it works!"), // attempt 1: fake-save, check will fail
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
+		text("wrote index.html for real this time"), // fix worker finishes
+	}}
+	r, _ := newRunner(t, client)
+
+	m := &Mission{ID: "f1", Task: "make a hello page", Phase: PhasePlan}
+	if _, err := r.Run(context.Background(), m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if m.Phase != PhaseDone {
+		t.Fatalf("Phase = %s, want done", m.Phase)
+	}
+	sub := m.Subtasks[0]
+	if sub.Attempts != 2 {
+		t.Fatalf("Attempts = %d, want 2 (original + one fix)", sub.Attempts)
+	}
+	joined := strings.Join(sub.Facts, "\n")
+	for _, want := range []string{
+		"attempt 1 wrote: nothing", "check: FAILED",
+		"attempt 2 wrote: index.html", "check: PASSED",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("facts missing %q:\n%s", want, joined)
+		}
+	}
+	// The fix worker's seed must carry the evidence, not a paraphrase.
+	fixSeed := client.requests[2].Messages[1].Content
+	if !strings.Contains(fixSeed, "FAILED its mechanical check") {
+		t.Fatalf("fix seed missing failure framing:\n%s", fixSeed)
+	}
+	if !strings.Contains(fixSeed, "does not exist") {
+		t.Fatalf("fix seed missing the check's actual output:\n%s", fixSeed)
+	}
+	if m.Replans != 0 {
+		t.Fatalf("Replans = %d, want 0 — the fix loop converged", m.Replans)
+	}
+}
+
+func TestRunner_Replan_AfterFixExhaustion(t *testing.T) {
+	noFilePlan := `{"subtasks":[{"id":"x","milestone":"wrap","title":"summarize","goal":"State that the work is complete.","acceptance":["a summary was produced"],"files_hint":[],"check":{"type":"none"}}]}`
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		text("done (not really)"), // s1 worker, no writes → check fails
+		text(noFilePlan),          // replan for the remaining work
+		text("all wrapped up"),    // s2 worker
+	}}
+	r, _ := newRunner(t, client)
+	r.MaxFixAttempts = -1 // isolate the replan path from the fix loop
+
+	m := &Mission{ID: "r1", Task: "make a hello page", Phase: PhasePlan}
+	if _, err := r.Run(context.Background(), m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if m.Replans != 1 {
+		t.Fatalf("Replans = %d, want 1", m.Replans)
+	}
+	if len(m.Subtasks) != 2 {
+		t.Fatalf("subtasks = %d, want 2 (failed s1 kept + new s2)", len(m.Subtasks))
+	}
+	if m.Subtasks[0].Status != StatusFailed {
+		t.Fatalf("s1 status = %s, want failed — replacement, not erasure", m.Subtasks[0].Status)
+	}
+	if m.Subtasks[1].ID != "s2" || m.Subtasks[1].Status != StatusDone {
+		t.Fatalf("new subtask = %+v, want s2 done", m.Subtasks[1])
+	}
+	if m.Phase != PhaseDone {
+		t.Fatalf("Phase = %s, want done", m.Phase)
+	}
+	// The replan call saw the execution record and the failure reason.
+	replanMsg := client.requests[2].Messages[1].Content
+	if !strings.Contains(replanMsg, "check: FAILED") {
+		t.Fatalf("replan message missing execution record:\n%s", replanMsg)
+	}
+	if !strings.Contains(replanMsg, "subtask failed its check") {
+		t.Fatalf("replan message missing the reason:\n%s", replanMsg)
+	}
+}
+
+func TestRunner_Replan_BudgetExhaustedFailsLoudly(t *testing.T) {
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		text("done (not really)"), // no writes → check fails
+	}}
+	r, _ := newRunner(t, client)
+	r.MaxFixAttempts = -1
+	r.MaxReplans = -1 // no replans allowed
+
+	m := &Mission{ID: "r2", Task: "make a hello page", Phase: PhasePlan}
+	_, err := r.Run(context.Background(), m)
+	if err == nil || !strings.Contains(err.Error(), "replan budget exhausted") {
+		t.Fatalf("err = %v, want replan-budget failure", err)
+	}
+	if m.Phase != PhaseFailed {
+		t.Fatalf("Phase = %s, want failed", m.Phase)
+	}
+}
+
+func TestRunner_VerifyRegression_TriggersReplan(t *testing.T) {
+	// A mission that reaches verify with a done subtask whose artifact has
+	// since gone missing — the replan must produce the remaining work and
+	// the second verify pass must confirm it.
+	fixPlan := `{"subtasks":[{"id":"x","milestone":"repair","title":"restore page","goal":"Recreate index.html with a hello message.","acceptance":["index.html exists"],"files_hint":["index.html"],"check":{"type":"file_exists","path":"index.html"}}]}`
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(fixPlan),
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>restored</html>"}),
+		text("restored index.html"),
+	}}
+	r, _ := newRunner(t, client)
+
+	m := &Mission{ID: "v1", Task: "make a hello page", Phase: PhaseVerify,
+		Subtasks: []Subtask{{
+			ID: "s1", Title: "create page", Goal: "make page", Status: StatusDone,
+			Acceptance: []string{"index.html exists"},
+			Check:      Check{Type: "file_exists", Path: "index.html"}, // file was never written
+		}},
+		Cursor: 1,
+	}
+	if _, err := r.Run(context.Background(), m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if m.Replans != 1 {
+		t.Fatalf("Replans = %d, want 1", m.Replans)
+	}
+	if m.Phase != PhaseDone {
+		t.Fatalf("Phase = %s, want done", m.Phase)
+	}
+	joined := strings.Join(m.Subtasks[0].Facts, "\n")
+	if !strings.Contains(joined, "final verify: FAILED") {
+		t.Fatalf("regression not recorded on s1:\n%s", joined)
+	}
+}
+
+func TestRunner_Explore_GreenFieldSkipsStraightToPlan(t *testing.T) {
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
+		text("created"),
+	}}
+	r, _ := newRunner(t, client)
+
+	m := &Mission{ID: "e1", Task: "make a hello page", Phase: PhaseExplore}
+	if _, err := r.Run(context.Background(), m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if m.Map != "" {
+		t.Fatalf("green-field workspace should produce no map, got:\n%s", m.Map)
+	}
+	// The very first model call must be the plan — no annotation worker.
+	if client.requests[0].Grammar != PlanGrammar {
+		t.Fatal("first call should be the grammar-constrained plan call")
+	}
+}
+
+func TestRunner_Explore_BuildsMapAndFeedsPlanner(t *testing.T) {
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text("- entry point is index.html\n- no build step needed"), // annotation worker
+		text(validPlanJSON),
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
+		text("created"),
+	}}
+	r, dir := newRunner(t, client)
+
+	// Enough real files to clear the green-field threshold.
+	for _, p := range []string{"README.md", "old.js", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(r.WS.Root(), p), []byte("content of "+p), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := &Mission{ID: "e2", Task: "make a hello page", Phase: PhaseExplore}
+	if _, err := r.Run(context.Background(), m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !strings.Contains(m.Map, "## Directory tree") {
+		t.Fatalf("mechanical map missing:\n%s", m.Map)
+	}
+	if !strings.Contains(m.Map, "entry point is index.html") {
+		t.Fatalf("annotation notes missing from map:\n%s", m.Map)
+	}
+	// The annotation worker is read-only.
+	for _, def := range client.requests[0].Tools {
+		if def.Name == "write_file" || def.Name == "run_shell" {
+			t.Fatalf("annotation worker got mutating tool %s", def.Name)
+		}
+	}
+	// The planner saw the map, not just a bare listing.
+	planMsg := client.requests[1].Messages[1].Content
+	if !strings.Contains(planMsg, "## Directory tree") {
+		t.Fatalf("plan call did not receive the map:\n%s", planMsg)
+	}
+	// map.md persisted for the human.
+	if _, err := os.Stat(filepath.Join(dir, "map.md")); err != nil {
+		t.Fatalf("map.md not written: %v", err)
+	}
+}
+
+func TestRunner_Explore_AnnotationFailureIsNotFatal(t *testing.T) {
+	// The annotation worker errors out (unexpected extra call) — the
+	// mission must proceed on the mechanical map alone.
+	client := &runnerClient{responses: []llm.ChatResponse{
+		// annotation worker gets an empty answer, then its retry also empty
+		// → worker returns "", which is fine; simplest failure shape here is
+		// just letting it produce nothing useful.
+		text(""),
+		text(""),
+		text(validPlanJSON),
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
+		text("created"),
+	}}
+	r, _ := newRunner(t, client)
+	for _, p := range []string{"README.md", "old.js", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(r.WS.Root(), p), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := &Mission{ID: "e3", Task: "make a hello page", Phase: PhaseExplore}
+	if _, err := r.Run(context.Background(), m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if m.Phase != PhaseDone {
+		t.Fatalf("Phase = %s, want done despite useless annotation", m.Phase)
+	}
+	if strings.Contains(m.Map, "Notes (model-generated") {
+		t.Fatalf("empty notes should not be appended:\n%s", m.Map)
+	}
+}
+
+func TestRunner_Review_OKVerdictRecordsNote(t *testing.T) {
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
+		text("created"),
+		text("OK"), // review worker
+		text(`{"verdict":"ok","notes":""}`), // verdict call
+	}}
+	r, _ := newRunner(t, client)
+	r.SkipReview = false
+
+	m := &Mission{ID: "rv1", Task: "make a hello page", Phase: PhasePlan}
+	report, err := r.Run(context.Background(), m)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(m.Notes) != 1 || m.Notes[0] != "review: ok" {
+		t.Fatalf("Notes = %v, want [review: ok]", m.Notes)
+	}
+	if !strings.Contains(report, "review: ok") {
+		t.Fatalf("report missing review note:\n%s", report)
+	}
+	// The verdict call is decision-narrowed and tool-free.
+	verdictReq := client.requests[4]
+	if verdictReq.Grammar != DecisionGrammar {
+		t.Fatal("verdict call must carry the decision grammar")
+	}
+	if len(verdictReq.Tools) != 0 {
+		t.Fatal("verdict call must be tool-free")
+	}
+	// The review worker is read-only.
+	for _, def := range client.requests[3].Tools {
+		if def.Name == "write_file" || def.Name == "run_shell" {
+			t.Fatalf("review worker got mutating tool %s", def.Name)
+		}
+	}
+}
+
+func TestRunner_Review_GapsSpendReplanBudget(t *testing.T) {
+	gapPlan := `{"subtasks":[{"id":"x","milestone":"repair","title":"add stylesheet","goal":"Create style.css and link it from index.html.","acceptance":["style.css exists"],"files_hint":["style.css"],"check":{"type":"file_exists","path":"style.css"}}]}`
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html><link href=style.css>hi</html>"}),
+		text("created"),
+		text("- style.css is referenced by index.html but does not exist"), // review 1
+		text(`{"verdict":"gaps","notes":"style.css referenced but missing"}`),
+		text(gapPlan), // replan from review gaps
+		toolCall("write_file", map[string]string{"path": "style.css", "content": "body{margin:0}"}),
+		text("added style.css"),
+		text("OK"), // review 2 (second verify cycle)
+		text(`{"verdict":"ok","notes":""}`),
+	}}
+	r, _ := newRunner(t, client)
+	r.SkipReview = false
+
+	m := &Mission{ID: "rv2", Task: "make a styled hello page", Phase: PhasePlan}
+	if _, err := r.Run(context.Background(), m); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if m.Replans != 1 {
+		t.Fatalf("Replans = %d, want 1 (spent on review gaps)", m.Replans)
+	}
+	if m.Phase != PhaseDone {
+		t.Fatalf("Phase = %s, want done", m.Phase)
+	}
+	if len(m.Subtasks) != 2 || m.Subtasks[1].Status != StatusDone {
+		t.Fatalf("gap subtask not executed: %+v", m.Subtasks)
+	}
+	// The replan call carried the review's gaps as the reason.
+	replanMsg := client.requests[5].Messages[1].Content
+	if !strings.Contains(replanMsg, "review found gaps") || !strings.Contains(replanMsg, "style.css") {
+		t.Fatalf("replan reason missing review gaps:\n%s", replanMsg)
+	}
+}
+
+func TestRunner_Review_GapsWithoutBudgetStillFinishes(t *testing.T) {
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
+		text("created"),
+		text("- missing style.css"), // review
+		text(`{"verdict":"gaps","notes":"missing style.css"}`),
+	}}
+	r, _ := newRunner(t, client)
+	r.SkipReview = false
+	r.MaxReplans = -1 // no budget for the gaps
+
+	m := &Mission{ID: "rv3", Task: "make a hello page", Phase: PhasePlan}
+	report, err := r.Run(context.Background(), m)
+	if err != nil {
+		t.Fatalf("Run: %v — passing checks must not fail on review alone", err)
+	}
+	if m.Phase != PhaseDone {
+		t.Fatalf("Phase = %s, want done", m.Phase)
+	}
+	if !strings.Contains(report, "review flagged unresolved gaps") {
+		t.Fatalf("report must record the unresolved gaps honestly:\n%s", report)
 	}
 }
 

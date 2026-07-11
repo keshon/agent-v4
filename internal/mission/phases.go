@@ -2,6 +2,8 @@ package mission
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +40,18 @@ type Runner struct {
 	// send the plan back with an edit note. Zero means 2.
 	MaxPlanRevisions int
 
+	// MaxFixAttempts is how many fresh fix workers may follow a failed
+	// check before the subtask is declared failed (total worker runs per
+	// subtask = 1 + MaxFixAttempts). Zero means 2; negative disables the
+	// fix loop entirely.
+	MaxFixAttempts int
+
+	// MaxReplans bounds how many times a stopped plan may be replaced by
+	// a new one for the remaining work. Zero means 1; negative disables
+	// replanning. Together with MaxFixAttempts this bounds total worker
+	// runs by construction: subtasks × (1+fixes) × (1+replans).
+	MaxReplans int
+
 	// ApprovePlan, if set, gates execution on a human reading the
 	// rendered plan. Return (true, "") to run it, (false, "note") to
 	// regenerate with the note, (false, "") to abort the mission. Nil
@@ -48,6 +62,17 @@ type Runner struct {
 	// during the verify phase, independent of whatever checks the
 	// planner declared — the harness's own ground truth.
 	VerifyCmd string
+
+	// SkipMapNotes disables the read-only annotation worker in the
+	// explore phase; the mechanical map alone is used. The mechanical map
+	// never depends on the model either way.
+	SkipMapNotes bool
+
+	// SkipReview disables the final read-only review worker. When it
+	// runs, its verdict is decision-narrowed to ok/gaps by grammar; gaps
+	// can spend remaining replan budget, but a mission whose checks all
+	// passed never fails because of the review alone.
+	SkipReview bool
 
 	// OnStep mirrors agent.Config.OnStep for worker steps, tagged with
 	// the subtask id. OnEvent narrates phase-level progress. Both
@@ -76,6 +101,20 @@ func (r *Runner) maxPlanRevisions() int {
 	return 2
 }
 
+func (r *Runner) maxFixAttempts() int {
+	if r.MaxFixAttempts != 0 {
+		return max(r.MaxFixAttempts, 0)
+	}
+	return 2
+}
+
+func (r *Runner) maxReplans() int {
+	if r.MaxReplans != 0 {
+		return max(r.MaxReplans, 0)
+	}
+	return 1
+}
+
 // Run drives m from its current phase to a terminal one and returns the
 // final report. The error is non-nil when the mission FAILED — the
 // report still describes everything that was measured, because failing
@@ -84,8 +123,7 @@ func (r *Runner) Run(ctx context.Context, m *Mission) (string, error) {
 	for {
 		switch m.Phase {
 		case PhaseExplore:
-			// Mechanical map generation lands in a later stage; the
-			// listing computed per-phase below covers Stage 2.
+			r.runExplore(ctx, m)
 			m.Phase = PhasePlan
 			if err := m.Save(r.Dir); err != nil {
 				return "", err
@@ -105,20 +143,63 @@ func (r *Runner) Run(ctx context.Context, m *Mission) (string, error) {
 				}
 				continue
 			}
-			if sub.Status == StatusDone || sub.Status == StatusSkipped {
+			// Failed subtasks are skipped too: a failed subtask still at
+			// the cursor after a resume means it was already either
+			// replaced by a replan or is about to fail the mission below —
+			// never silently re-run.
+			if sub.Status == StatusDone || sub.Status == StatusSkipped || sub.Status == StatusFailed {
 				m.Cursor++
 				if err := m.Save(r.Dir); err != nil {
 					return "", err
 				}
 				continue
 			}
-			if err := r.runSubtask(ctx, m, sub); err != nil {
+			err := r.runSubtask(ctx, m, sub)
+			if err == nil {
+				continue
+			}
+			if !errors.Is(err, errSubtaskFailed) {
 				return r.fail(m, "subtask %s: %v", sub.ID, err)
+			}
+			// Check failed and fix attempts are exhausted — the one
+			// remaining lever is a new plan for the remaining work.
+			if rerr := r.tryReplan(ctx, m, err.Error()); rerr != nil {
+				return r.fail(m, "subtask %s: %v; %v", sub.ID, err, rerr)
 			}
 
 		case PhaseVerify:
-			if err := r.runVerify(ctx, m); err != nil {
-				return r.fail(m, "verify: %v", err)
+			regressions := r.runVerifyChecks(ctx, m)
+			if len(regressions) > 0 {
+				reason := "final verification failed:\n" + strings.Join(regressions, "\n")
+				if rerr := r.tryReplan(ctx, m, reason); rerr != nil {
+					return r.fail(m, "%s; %v", reason, rerr)
+				}
+				continue
+			}
+			r.event("all checks passed")
+
+			// The review net catches whole-task gaps the per-subtask
+			// checks can't see. Gaps spend the replan budget when there is
+			// any; otherwise they're recorded honestly and the mission
+			// still finishes — its declared checks did pass.
+			if !r.SkipReview {
+				if gaps, ok := r.runReview(ctx, m); !ok {
+					if m.Replans < r.maxReplans() {
+						if rerr := r.tryReplan(ctx, m, "review found gaps in the finished work:\n"+gaps); rerr == nil {
+							continue
+						}
+						// A failed replan generation is not worth failing a
+						// mission whose checks all passed — record and finish.
+					}
+					m.Notes = append(m.Notes, "review flagged unresolved gaps: "+agent.TruncateMiddle(gaps, 500))
+				} else {
+					m.Notes = append(m.Notes, "review: ok")
+				}
+			}
+
+			m.Phase = PhaseDone
+			if err := m.Save(r.Dir); err != nil {
+				return "", err
 			}
 
 		case PhaseDone:
@@ -141,10 +222,68 @@ func (r *Runner) fail(m *Mission, format string, args ...any) (string, error) {
 	return m.RenderReport(), fmt.Errorf("mission failed: %s", reason)
 }
 
+// --- explore phase ---
+
+// greenFieldThreshold is the file count under which exploration is
+// pointless — the plain listing already says everything.
+const greenFieldThreshold = 3
+
+// runExplore builds the mechanical codebase map and, when possible,
+// enriches it with a bounded read-only annotation worker. Deliberately
+// infallible: any part of it failing just means less map — planning
+// proceeds either way, so this phase can never wedge a mission.
+func (r *Runner) runExplore(ctx context.Context, m *Mission) {
+	_, existing := WorkspaceListing(r.WS)
+	if len(existing) < greenFieldThreshold {
+		r.event("explore: %d files in workspace — skipping map generation", len(existing))
+		return
+	}
+
+	r.event("explore: building codebase map (%d files)", len(existing))
+	m.Map = BuildMap(r.WS)
+	if m.Map == "" {
+		return
+	}
+
+	if !r.SkipMapNotes {
+		var onStep func(step int, msg llm.Message)
+		if r.OnStep != nil {
+			onStep = func(step int, msg llm.Message) { r.OnStep("explore", step, msg) }
+		}
+		annotator := agent.New(agent.Config{
+			Client:       r.Client,
+			Tools:        tools.ReadOnly(r.WS, r.Procs),
+			System:       prompts.MissionMapAnnotate,
+			MaxSteps:     8,
+			MaxTokens:    r.MaxTokens,
+			ContextLimit: r.ContextLimit,
+			SkipVerify:   true,
+			StateFile:    filepath.Join(r.Dir, "workers", "explore.json"),
+			OnStep:       onStep,
+		})
+		notes, err := annotator.Run(ctx, fmt.Sprintf(prompts.MissionMapAnnotateTask, m.Task, m.Map))
+		if err != nil {
+			r.event("explore: annotation worker failed (%v) — using mechanical map only", err)
+		} else if notes = strings.TrimSpace(notes); notes != "" {
+			m.Map += "\n\n## Notes (model-generated, verify before trusting)\n" +
+				agent.TruncateMiddle(notes, 1500)
+		}
+	}
+
+	// Best-effort artifact for the human; the ledger carries the real copy.
+	_ = os.WriteFile(filepath.Join(r.Dir, "map.md"), []byte(m.Map), 0o644)
+}
+
 // --- plan phase ---
 
 func (r *Runner) runPlan(ctx context.Context, m *Mission) error {
 	listing, existing := WorkspaceListing(r.WS)
+	// The map, when explore produced one, is a strictly richer view of the
+	// same workspace — hand the planner that instead of the bare listing.
+	// ExistingFiles stays sourced from the real walk either way.
+	if m.Map != "" {
+		listing = m.Map
+	}
 	editNote := ""
 
 	for revision := 0; ; revision++ {
@@ -195,19 +334,78 @@ func planAttemptLabel(revision int) string {
 
 // --- execute phase ---
 
+// errSubtaskFailed marks "the check still fails after all fix attempts" —
+// the one failure the Runner can answer with a replan instead of
+// terminating. Wrapped errors carry the failing check output as evidence.
+var errSubtaskFailed = errors.New("subtask failed its check")
+
 func (r *Runner) runSubtask(ctx context.Context, m *Mission, sub *Subtask) error {
-	sub.Status = StatusRunning
-	sub.Attempts++
-	if err := m.Save(r.Dir); err != nil {
+	// StatusRunning on entry means the process died mid-worker last time —
+	// the one situation where the newest saved transcript should be
+	// continued instead of starting a fresh attempt.
+	resumeInterrupted := sub.Status == StatusRunning
+
+	listing, _ := WorkspaceListing(r.WS)
+	checkOut, ok, err := r.attempt(ctx, m, sub, CompileSeed(m, sub, listing), resumeInterrupted)
+	if err != nil {
 		return err
 	}
-	r.event("subtask %s (%s): starting worker (attempt %d)", sub.ID, sub.Title, sub.Attempts)
+
+	for !ok && sub.Attempts < 1+r.maxFixAttempts() {
+		r.event("subtask %s: check FAILED — starting fix worker (%d/%d)",
+			sub.ID, sub.Attempts, r.maxFixAttempts())
+		listing, _ = WorkspaceListing(r.WS)
+		fixSeed := CompileFixSeed(m, sub, agent.TruncateMiddle(checkOut, 2000), listing)
+		checkOut, ok, err = r.attempt(ctx, m, sub, fixSeed, false)
+		if err != nil {
+			return err
+		}
+	}
+
+	if ok {
+		sub.Status = StatusDone
+		m.Cursor++
+		r.event("subtask %s: check PASSED", sub.ID)
+		return m.Save(r.Dir)
+	}
+
+	sub.Status = StatusFailed
+	_ = m.Save(r.Dir)
+	r.event("subtask %s: check still FAILED after %d attempts", sub.ID, sub.Attempts)
+	return fmt.Errorf("%w after %d attempts: %s",
+		errSubtaskFailed, sub.Attempts, agent.TruncateMiddle(checkOut, 500))
+}
+
+// attempt runs one worker (fresh or resumed) against sub and then runs
+// the subtask's check. Everything recorded is measured: which files the
+// worker actually wrote (RunReport), what the check actually printed.
+func (r *Runner) attempt(ctx context.Context, m *Mission, sub *Subtask, seed string, resumeInterrupted bool) (checkOut string, ok bool, err error) {
+	resumeState := ""
+	if resumeInterrupted {
+		resumeState = r.latestWorkerState(sub.ID)
+	}
+	if resumeState == "" {
+		sub.Attempts++
+	}
+	sub.Status = StatusRunning
+	if err := m.Save(r.Dir); err != nil {
+		return "", false, err
+	}
+	r.event("subtask %s (%s): worker attempt %d", sub.ID, sub.Title, sub.Attempts)
 
 	worker := r.newWorker(sub)
-	listing, _ := WorkspaceListing(r.WS)
-	seed := CompileSeed(m, sub, listing)
-
-	result, runErr := r.runOrResumeWorker(ctx, worker, sub, seed)
+	var result string
+	var runErr error
+	if resumeState != "" {
+		if history, lerr := agent.LoadState(resumeState); lerr == nil && len(history) > 1 {
+			r.event("subtask %s: resuming interrupted worker (%s)", sub.ID, filepath.Base(resumeState))
+			result, runErr = worker.Resume(ctx, history, prompts.Resume)
+		} else {
+			result, runErr = worker.Run(ctx, seed)
+		}
+	} else {
+		result, runErr = worker.Run(ctx, seed)
+	}
 	report := worker.Report()
 
 	// Facts are measured, not claimed. Record them even when the worker
@@ -215,35 +413,96 @@ func (r *Runner) runSubtask(ctx context.Context, m *Mission, sub *Subtask) error
 	// changed the workspace, and the check (and any human reading the
 	// ledger) must see the whole truth.
 	if len(report.MutatedPaths) > 0 {
-		sub.AddFact("wrote: %s", strings.Join(report.MutatedPaths, ", "))
+		sub.AddFact("attempt %d wrote: %s", sub.Attempts, strings.Join(report.MutatedPaths, ", "))
 		m.Mutated = unionPaths(m.Mutated, report.MutatedPaths)
 	} else {
-		sub.AddFact("wrote: nothing")
+		sub.AddFact("attempt %d wrote: nothing", sub.Attempts)
 	}
 	if runErr != nil {
-		sub.AddFact("worker stopped early: %v", runErr)
+		sub.AddFact("attempt %d stopped early: %v", sub.Attempts, runErr)
 	}
 	sub.Summary = agent.TruncateMiddle(strings.TrimSpace(result), maxSummaryChars)
 
 	// The check is the verdict — not the worker's exit status. A worker
 	// that hit MaxSteps but finished the actual work still passes; a
 	// worker that returned a confident report over an empty file fails.
-	checkOut, ok := RunCheck(ctx, sub.Check, r.WS)
+	checkOut, ok = RunCheck(ctx, sub.Check, r.WS)
 	if ok {
 		sub.AddFact("check: PASSED — %s", agent.TruncateMiddle(checkOut, 200))
-		sub.Status = StatusDone
-		m.Cursor++
-		r.event("subtask %s: check PASSED", sub.ID)
+	} else {
+		sub.AddFact("check: FAILED — %s", agent.TruncateMiddle(checkOut, 2000))
+	}
+	return checkOut, ok, m.Save(r.Dir)
+}
+
+// --- replan ---
+
+// tryReplan replaces the not-yet-done tail of the plan with fresh
+// subtasks for the remaining work. Executed subtasks are frozen with
+// their measured history — the model plans forward only. Bounded by
+// MaxReplans; over budget returns an error and the mission fails loudly.
+func (r *Runner) tryReplan(ctx context.Context, m *Mission, reason string) error {
+	if m.Replans >= r.maxReplans() {
+		return fmt.Errorf("replan budget exhausted (%d used)", m.Replans)
+	}
+	m.Replans++
+	r.event("replanning (%d/%d)", m.Replans, r.maxReplans())
+
+	listing, existing := WorkspaceListing(r.WS)
+	editNote := ""
+	for revision := 0; ; revision++ {
+		newSubs, warnings, err := GenerateReplan(ctx, r.Client, ReplanRequest{
+			PlanRequest: PlanRequest{
+				Task:          m.Task,
+				FileListing:   listing,
+				ExistingFiles: existing,
+				EditNote:      editNote,
+				MaxTokens:     r.MaxTokens,
+			},
+			Record: m.RenderReport(),
+			Reason: reason,
+		})
+		if err != nil {
+			return err
+		}
+		// Renumber after the frozen history; the failed subtask keeps its
+		// place and its facts — replacement, not erasure.
+		for i := range newSubs {
+			newSubs[i].ID = fmt.Sprintf("s%d", len(m.Subtasks)+i+1)
+		}
+
+		if r.ApprovePlan != nil {
+			rendered := renderReplan(m, newSubs, warnings)
+			approved, note := r.ApprovePlan(rendered)
+			if !approved && note == "" {
+				return fmt.Errorf("replan rejected by user")
+			}
+			if !approved {
+				if revision+1 >= r.maxPlanRevisions() {
+					return fmt.Errorf("replan still rejected after %d revisions", r.maxPlanRevisions())
+				}
+				editNote = note
+				continue
+			}
+		}
+
+		m.Cursor = len(m.Subtasks)
+		m.Subtasks = append(m.Subtasks, newSubs...)
+		m.Phase = PhaseExecute
 		return m.Save(r.Dir)
 	}
+}
 
-	sub.AddFact("check: FAILED — %s", agent.TruncateMiddle(checkOut, 2000))
-	sub.Status = StatusFailed
-	_ = m.Save(r.Dir)
-	r.event("subtask %s: check FAILED", sub.ID)
-	// Stage 2 fails the mission on the first failed subtask; the bounded
-	// fix loop and replanning arrive in the next stage and slot in here.
-	return fmt.Errorf("check failed: %s", agent.TruncateMiddle(checkOut, 500))
+func renderReplan(m *Mission, newSubs []Subtask, warnings []string) string {
+	var b strings.Builder
+	b.WriteString("REPLAN — executed subtasks are kept as-is:\n")
+	b.WriteString(m.RenderLedger())
+	b.WriteString("\n\nNew subtasks for the remaining work:\n")
+	renderSubtasks(&b, newSubs)
+	if len(warnings) > 0 {
+		b.WriteString("\nNew files the plan intends to create:\n  " + strings.Join(warnings, "\n  "))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (r *Runner) newWorker(sub *Subtask) *agent.Agent {
@@ -271,19 +530,6 @@ func (r *Runner) workerStateFile(sub *Subtask) string {
 	return filepath.Join(r.Dir, "workers", fmt.Sprintf("%s-a%d.json", sub.ID, sub.Attempts))
 }
 
-// runOrResumeWorker continues an interrupted worker transcript when one
-// exists for this subtask (the process died mid-subtask and the mission
-// was resumed); otherwise it starts fresh from the compiled seed.
-func (r *Runner) runOrResumeWorker(ctx context.Context, worker *agent.Agent, sub *Subtask, seed string) (string, error) {
-	if state := r.latestWorkerState(sub.ID); state != "" {
-		if history, err := agent.LoadState(state); err == nil && len(history) > 1 {
-			r.event("subtask %s: resuming interrupted worker (%s)", sub.ID, filepath.Base(state))
-			return worker.Resume(ctx, history, prompts.Resume)
-		}
-	}
-	return worker.Run(ctx, seed)
-}
-
 // latestWorkerState returns the newest saved transcript for a subtask,
 // or "" when this is a fresh start. Attempt files sort lexically within
 // one subtask because attempts share the "sN-a" prefix.
@@ -301,12 +547,78 @@ func (r *Runner) latestWorkerState(subID string) string {
 	return newest
 }
 
+// --- review ---
+
+// runReview inspects the finished work with a read-only worker, then
+// narrows its free-text report to an ok/gaps verdict with the decision
+// grammar. Infallible by policy: any error in the machinery means "ok" —
+// the review is an extra net over already-passing checks, never a new way
+// for a green mission to die.
+func (r *Runner) runReview(ctx context.Context, m *Mission) (gaps string, ok bool) {
+	r.event("review: inspecting the finished work")
+
+	var onStep func(step int, msg llm.Message)
+	if r.OnStep != nil {
+		onStep = func(step int, msg llm.Message) { r.OnStep("review", step, msg) }
+	}
+	reviewer := agent.New(agent.Config{
+		Client:       r.Client,
+		Tools:        tools.ReadOnly(r.WS, r.Procs),
+		System:       prompts.MissionReview,
+		MaxSteps:     8,
+		MaxTokens:    r.MaxTokens,
+		ContextLimit: r.ContextLimit,
+		SkipVerify:   true,
+		StateFile:    filepath.Join(r.Dir, "workers", "review.json"),
+		OnStep:       onStep,
+	})
+	report, err := reviewer.Run(ctx, fmt.Sprintf(prompts.MissionReviewTask,
+		m.Task, m.RenderPlan(), m.RenderReport()))
+	if err != nil {
+		r.event("review worker failed (%v) — skipping review", err)
+		return "", true
+	}
+
+	resp, err := r.Client.Chat(ctx, llm.ChatRequest{
+		Messages: []llm.Message{{
+			Role:    llm.RoleUser,
+			Content: fmt.Sprintf(prompts.MissionVerdict, agent.TruncateMiddle(strings.TrimSpace(report), 3000)),
+		}},
+		Grammar:     DecisionGrammar,
+		Temperature: planTemperature,
+		MaxTokens:   r.MaxTokens,
+	})
+	if err != nil {
+		r.event("review verdict call failed (%v) — skipping review", err)
+		return "", true
+	}
+	var v struct {
+		Verdict string `json:"verdict"`
+		Notes   string `json:"notes"`
+	}
+	if jerr := json.Unmarshal([]byte(strings.TrimSpace(resp.Message.Content)), &v); jerr != nil {
+		r.event("review verdict unparseable (%v) — skipping review", jerr)
+		return "", true
+	}
+	if v.Verdict != "gaps" {
+		r.event("review: ok")
+		return "", true
+	}
+	r.event("review: gaps — %s", agent.TruncateMiddle(v.Notes, 200))
+	gaps = v.Notes
+	if detail := strings.TrimSpace(report); detail != "" {
+		gaps += "\n\nReviewer detail:\n" + agent.TruncateMiddle(detail, 1500)
+	}
+	return gaps, false
+}
+
 // --- verify phase ---
 
-// runVerify re-runs every done subtask's check — later subtasks can break
-// earlier ones — plus the mission-level VerifyCmd. Any regression fails
-// the mission with the specifics on record.
-func (r *Runner) runVerify(ctx context.Context, m *Mission) error {
+// runVerifyChecks re-runs every done subtask's check — later subtasks can
+// break earlier ones — plus the mission-level VerifyCmd, and returns the
+// regressions. The Run loop decides whether they trigger a replan or a
+// loud failure.
+func (r *Runner) runVerifyChecks(ctx context.Context, m *Mission) []string {
 	var regressions []string
 	for i := range m.Subtasks {
 		sub := &m.Subtasks[i]
@@ -330,10 +642,6 @@ func (r *Runner) runVerify(ctx context.Context, m *Mission) error {
 
 	if len(regressions) > 0 {
 		_ = m.Save(r.Dir)
-		return fmt.Errorf("final checks failed:\n%s", strings.Join(regressions, "\n"))
 	}
-
-	m.Phase = PhaseDone
-	r.event("all checks passed")
-	return m.Save(r.Dir)
+	return regressions
 }

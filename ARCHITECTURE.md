@@ -74,9 +74,12 @@ capability ceiling to design around.
   typed checks) lives in `.agent/tasks/<id>/mission.json`, saved atomically
   after every state change. Workers see a rendering of it; no worker ever
   sees another worker's transcript.
-- **Phases are decided in Go, not by the model.** plan → execute → verify,
-  a `switch` in `Runner.Run`. The model fills in content (a plan, a
-  subtask's work); the harness decides what happens next.
+- **Phases are decided in Go, not by the model.** explore → plan →
+  execute → verify, a `switch` in `Runner.Run`. The model fills in
+  content (map notes, a plan, a subtask's work); the harness decides what
+  happens next. Explore is mostly mechanical (`mapgen.go` walks the tree,
+  reads manifest heads) with an optional read-only annotation worker
+  whose failure never blocks anything.
 - **Plan generation is decision-narrowed.** A tool-free `Chat` call with a
   per-request GBNF grammar (`mission.PlanGrammar`) — the model *cannot*
   emit anything but schema-shaped JSON. Grammar handles syntax; a Go
@@ -97,9 +100,22 @@ capability ceiling to design around.
   comes from the subtask's declared check (`file_exists`/`shell`/`http`),
   run mechanically by the harness. This is `VerifyZeroWrites` doctrine
   promoted from a nudge to the data model.
-- **Failure is loud and fully reported.** A failed check fails the mission
-  with every recorded fact in the report (bounded fix-loops and replanning
-  are the planned next stage). FAILED-with-facts beats fake success.
+- **Failure gets bounded correction, then loud reporting.** A failed
+  check gets up to `MaxFixAttempts` (default 2) fresh fix workers, each
+  seeded with the check's *actual output* and the files previous attempts
+  really touched. Exhausted, the one remaining lever is `MaxReplans`
+  (default 1) replans: a grammar-constrained call plans the *remaining*
+  work only — executed subtasks are frozen with their history, the failed
+  one keeps its facts (replacement, not erasure). Total worker runs are
+  bounded by construction: subtasks × (1+fixes) × (1+replans). Past all
+  budgets, FAILED-with-facts beats fake success.
+- **A final review net, narrowed to a two-way verdict.** After all checks
+  pass, a read-only worker inspects the result for whole-task gaps
+  (cross-file references, uncovered parts of the task), and its free-text
+  report is reduced to `{"verdict":"ok"|"gaps"}` by the decision grammar.
+  Gaps spend remaining replan budget; a mission whose checks all passed
+  never *fails* because of the review alone — unresolved gaps are recorded
+  in the report instead.
 
 What was deliberately **not** built: rolling summarization (a weak model
 summarizing its own history is where acceptance criteria silently die —

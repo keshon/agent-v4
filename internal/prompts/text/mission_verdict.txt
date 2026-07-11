@@ -1,0 +1,8 @@
+Below is a reviewer's report on whether a completed task has real gaps. Decide the verdict:
+- "ok" if the report says OK or raises only style opinions, nice-to-haves, or vague concerns.
+- "gaps" only if the report names concrete missing or broken pieces of the task.
+
+Put the essential gaps (or nothing) in notes, briefly.
+
+Reviewer's report:
+%s

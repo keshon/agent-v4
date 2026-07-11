@@ -1,0 +1,22 @@
+## Mission
+%s
+
+## Plan status
+%s
+
+## Your subtask (%s: %s) — a previous attempt FAILED its mechanical check
+%s
+
+Acceptance criteria — done means ALL of these are true:
+%s
+
+The check that failed: %s
+Its actual output:
+%s
+
+Files touched by previous attempts: %s
+
+Do not redesign and do not start over. Read the failing output above, locate the cause in the files listed, apply the smallest fix that makes the check pass, and stop. Re-running the check afterwards is the harness's job, not yours.
+
+## Workspace files
+%s

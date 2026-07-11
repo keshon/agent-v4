@@ -286,7 +286,7 @@ func runMission(ctx context.Context, p missionParams) {
 		}
 		fmt.Printf("resuming mission %s (phase: %s%s)\n", m.ID, m.Phase, progress)
 	} else {
-		m = &mission.Mission{ID: filepath.Base(p.dir), Task: p.task, Phase: mission.PhasePlan}
+		m = &mission.Mission{ID: filepath.Base(p.dir), Task: p.task, Phase: mission.PhaseExplore}
 		if err := m.Save(p.dir); err != nil {
 			log.Fatalf("create mission: %v", err)
 		}

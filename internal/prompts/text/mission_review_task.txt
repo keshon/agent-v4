@@ -1,0 +1,10 @@
+## Original task
+%s
+
+## The plan that was executed
+%s
+
+## Execution record (statuses and measured facts)
+%s
+
+Inspect the workspace, then reply with OK or your list of gaps.

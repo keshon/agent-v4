@@ -34,6 +34,34 @@ func GeneratePlan(ctx context.Context, client llm.Client, req PlanRequest) (subt
 		{Role: llm.RoleSystem, Content: prompts.MissionPlan},
 		{Role: llm.RoleUser, Content: fmt.Sprintf(prompts.MissionPlanTask, req.Task, req.FileListing)},
 	}
+	return generateSubtasks(ctx, client, messages, req)
+}
+
+// ReplanRequest carries everything a replan call needs beyond PlanRequest:
+// the execution record so far (statuses + measured facts) and the reason
+// the old plan stopped.
+type ReplanRequest struct {
+	PlanRequest
+	Record string // Mission.RenderReport() — statuses and facts, verbatim
+	Reason string // why replanning: the failing check output, review gaps
+}
+
+// GenerateReplan asks for a plan covering only the remaining work. The
+// caller keeps the already-executed subtasks frozen (with their measured
+// history) and appends the result — the model never gets to rewrite what
+// already happened.
+func GenerateReplan(ctx context.Context, client llm.Client, req ReplanRequest) (subtasks []Subtask, warnings []string, err error) {
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: prompts.MissionPlan},
+		{Role: llm.RoleUser, Content: fmt.Sprintf(prompts.MissionReplan,
+			req.Task, req.Record, req.Reason, req.FileListing)},
+	}
+	return generateSubtasks(ctx, client, messages, req.PlanRequest)
+}
+
+// generateSubtasks is the shared call-validate-retry core for plan and
+// replan generation.
+func generateSubtasks(ctx context.Context, client llm.Client, messages []llm.Message, req PlanRequest) (subtasks []Subtask, warnings []string, err error) {
 	if req.EditNote != "" {
 		messages = append(messages, llm.Message{
 			Role:    llm.RoleUser,
@@ -137,7 +165,7 @@ func validateCheck(s *Subtask) (errs []string) {
 		cmd := strings.TrimSpace(strings.ToLower(c.Cmd))
 		if cmd == "" {
 			errs = append(errs, fmt.Sprintf("%s: shell check has no cmd", s.ID))
-		} else if strings.HasPrefix(cmd, "echo") || cmd == "true" || strings.HasPrefix(cmd, "exit 0") {
+		} else if vacuousShellCheck(cmd) {
 			errs = append(errs, fmt.Sprintf("%s: shell check %q always succeeds and verifies nothing", s.ID, c.Cmd))
 		}
 	case "http":
@@ -148,4 +176,21 @@ func validateCheck(s *Subtask) (errs []string) {
 		errs = append(errs, fmt.Sprintf("%s: unknown check type %q", s.ID, c.Type))
 	}
 	return errs
+}
+
+// vacuousShellCheck flags commands that succeed regardless of whether any
+// work was done — a check that can't fail verifies nothing. Matched on
+// the first word (lowercased): a real weak-model plan produced `ls -l` as
+// a "check" and it passed vacuously, so this is a live failure shape, not
+// paranoia.
+func vacuousShellCheck(cmd string) bool {
+	first := cmd
+	if i := strings.IndexAny(first, " \t"); i >= 0 {
+		first = first[:i]
+	}
+	switch first {
+	case "echo", "ls", "dir", "pwd", "cd", "true", "cat", "type", "whoami", "date", "exit":
+		return true
+	}
+	return false
 }

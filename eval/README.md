@@ -78,6 +78,8 @@ steps for a weak model (see each prompt), no regression traps in the table.
 | 13 | `prompts/13-dev-server-trap.md` | run_shell vs start_background |
 | 14 | `prompts/14-multi-file-parallel.md` | delegate_task in one step (stretch) |
 | 15 | `prompts/15-mission-smoke.md` | mission mode: plan grammar, workers, checks |
+| 16 | `prompts/16-mission-fix.md` | mission fix loop convergence, replan path |
+| 17 | `prompts/17-doom-lite.md` | full mission pipeline on the motivating stress case |
 
 ## Fixtures
 

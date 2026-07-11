@@ -1,0 +1,20 @@
+A plan for the task below was partially executed and then stopped. You must produce a NEW plan for the remaining work only.
+
+## Task
+%s
+
+## Execution record (statuses and measured facts)
+%s
+
+## Why a new plan is needed
+%s
+
+## Workspace files
+%s
+
+Rules for the new plan, in addition to the standard ones:
+- Plan ONLY the remaining work. Subtasks marked done are frozen and will be kept — do not repeat them.
+- Address the recorded failure directly. Do not repeat an approach that already failed; change it.
+- Build on the files that already exist rather than recreating them.
+
+Produce the JSON plan now.
