@@ -186,6 +186,18 @@ If `-debug` ever shows tool calls behaving differently with the grammar on
 vs off, that's the signal to stop trusting the docs and either narrow the
 grammar further or fall back to `-grammar=false` for that backend.
 
+**Thinking models are a special case.** Qwen3-family models open their
+response with a literal `<think>` block — and the original grammar's
+"first character must not be `<`" rule blocked that opening token
+outright. A thinking model denied its own template prefix degrades in
+unpredictable ways (a live Qwen3.6 run produced `finish_reason: "length"`
+terminations after 5–38 tokens). The grammar now admits a leading
+`"<think>"` literal specifically, while still blocking `<tool_call…` at
+position 1; anything leaked *after* a think block is caught by the Go-side
+`looksLikeLeakedToolCall` check, which scans the whole message. As with
+everything in this section: verify against a live backend with `-debug`,
+and `-grammar=false` is the A/B lever when a model still misbehaves.
+
 ## Why this maps onto what v3 already had
 
 - `retry_nudge.go` → folded directly into `agent.Agent.Run`'s `stuckSteps`
@@ -292,20 +304,31 @@ is a safety net under that strategy, not a substitute for it.
 
 ## Don't trust "no tool calls" as automatically meaningful
 
-The "model stopped calling tools" branch now has three outcomes, checked
+The "model stopped calling tools" branch now has four outcomes, checked
 in this order:
 
-1. **Looks like a leaked pseudo tool-call** (`<tool_call...`, `<|tool_call...`
+1. **`finish_reason == "length"`** → not a finish at all. The backend cut
+   generation off and silently discarded whatever the model was building —
+   usually the tool call it had just announced. Real shape (Qwen3.6 live
+   run): "Let me write the plan.md file…" at 38 completion tokens, empty
+   tool_calls, and the loop accepted the stump as the final answer. Now it
+   gets a corrective nudge (`prompts.Truncated`: go straight to the call,
+   write large files in pieces) and loops, escalating through the stuck
+   counter so a persistently-truncating backend is still bounded.
+2. **Looks like a leaked pseudo tool-call** (`<tool_call...`, `<|tool_call...`
    anywhere in the content, not just at the start) → corrective nudge,
    loop again. A start-of-message-only grammar constraint missed this once
    it showed up mid-message — the fix moved to Go, where it's testable
    without a live backend.
-2. **Genuine finish, not yet verified** → the self-check round, now
+3. **Genuine finish, not yet verified** → the self-check round, now
    enriched with two pieces of *measured* fact instead of asking the model
    to grade itself blind: `MutatingTools` count (0 real writes this run
    means nothing was actually saved, full stop) and `Config.Verify` output
-   (real build/test command result, if one's configured).
-3. **Genuine finish, already verified** → return.
+   (real build/test command result, if one's configured). Mission workers
+   run with `SkipVerify` but `VerifyOnZeroWrites`: the round fires only
+   for the announce-without-write shape, where an in-context nudge is far
+   cheaper than the fresh fix worker it prevents.
+4. **Genuine finish, already verified** → return.
 
 ## Skills — convention, not infrastructure
 

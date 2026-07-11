@@ -551,11 +551,15 @@ func (r *Runner) newWorker(sub *Subtask) *agent.Agent {
 		MaxSteps:     r.maxWorkerSteps(),
 		MaxTokens:    r.MaxTokens,
 		ContextLimit: r.ContextLimit,
-		// The mission's checks are mechanical; the model self-check round
-		// would be a redundant extra call per subtask.
-		SkipVerify: true,
-		StateFile:  r.workerStateFile(sub),
-		OnStep:     onStep,
+		// The mission's checks are mechanical, so the general self-check
+		// round is a redundant extra call per subtask — EXCEPT when the
+		// worker is about to finish having written nothing: that's the
+		// announce-without-write shape, and one in-context zero-writes
+		// nudge is far cheaper than the fresh fix worker it prevents.
+		SkipVerify:         true,
+		VerifyOnZeroWrites: true,
+		StateFile:          r.workerStateFile(sub),
+		OnStep:             onStep,
 	})
 }
 

@@ -36,12 +36,16 @@ type KoboldClient struct {
 	Grammar string
 }
 
-// DefaultGrammar forbids a response from starting with '<' or '[', and
-// otherwise allows anything — plain prose, Unicode text, or a real
-// tool-call JSON object (which always starts with '{'). It blocks the two
-// leak shapes actually observed: a model's native "<tool_call>..." tags,
-// and a model writing out a whole tool-call envelope as a JSON *array* in
-// plain content instead of using the structured tool_calls field.
+// DefaultGrammar forbids a response from starting with '<' or '[' —
+// EXCEPT for a literal leading "<think>", which thinking models (Qwen3
+// family) must be allowed to emit or their generation degrades at the
+// first token. Otherwise it allows anything — plain prose, Unicode text,
+// or a real tool-call JSON object (which always starts with '{'). It
+// blocks the two leak shapes actually observed: a model's native
+// "<tool_call>..." tags, and a model writing out a whole tool-call
+// envelope as a JSON *array* in plain content instead of using the
+// structured tool_calls field. Mid-message leaks (including anything
+// after a think block) are caught in Go by looksLikeLeakedToolCall.
 //
 // This is fundamentally reactive — it's not a general solution to "models
 // sometimes leak structured output as text," just a growing blocklist of
@@ -59,7 +63,7 @@ type KoboldClient struct {
 // Verify with -debug: confirm "grammar" appears in the logged request,
 // and that move_file/list_files calls still work normally.
 const DefaultGrammar = `root ::= first rest
-first ::= [^<\[` + "\\x00" + `]
+first ::= [^<\[` + "\\x00" + `] | "<think>"
 rest ::= [^` + "\\x00" + `]*
 `
 
@@ -111,7 +115,8 @@ type wireRequest struct {
 
 type wireResponse struct {
 	Choices []struct {
-		Message wireMessage `json:"message"`
+		Message      wireMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -224,7 +229,8 @@ func (c *KoboldClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse,
 	}
 
 	return ChatResponse{
-		Message: out,
+		Message:      out,
+		FinishReason: wresp.Choices[0].FinishReason,
 		Usage: Usage{
 			PromptTokens:     wresp.Usage.PromptTokens,
 			CompletionTokens: wresp.Usage.CompletionTokens,

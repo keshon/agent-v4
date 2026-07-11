@@ -98,6 +98,26 @@ func TestChat_TemperatureSentWhenSet(t *testing.T) {
 	}
 }
 
+func TestChat_FinishReasonMapped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Let me just"},` +
+			`"finish_reason":"length"}],"usage":{"prompt_tokens":7426,"completion_tokens":38}}`))
+	}))
+	defer srv.Close()
+
+	c := NewKoboldClient(srv.URL, "local")
+	resp, err := c.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "go"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.FinishReason != "length" {
+		t.Fatalf("FinishReason = %q, want length", resp.FinishReason)
+	}
+}
+
 func TestChat_TemperatureOmittedWhenZero(t *testing.T) {
 	var captured []byte
 	srv := captureServer(t, &captured)

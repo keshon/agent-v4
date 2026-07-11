@@ -53,6 +53,11 @@ var (
 	// output, when Config.Verify is set. One %s: the output.
 	VerifyCheckResult = read("verify_check_result.txt")
 
+	// Truncated fires when a response ended with finish_reason "length"
+	// and no tool calls — the backend cut the model off mid-generation
+	// and whatever it was building (usually a tool call) was discarded.
+	Truncated = read("truncated.txt")
+
 	// LeakDetected fires when a response contains leaked native
 	// tool-call template text instead of a real structured call.
 	LeakDetected = read("leak_detected.txt")

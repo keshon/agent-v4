@@ -83,6 +83,16 @@ type Usage struct {
 type ChatResponse struct {
 	Message Message
 	Usage   Usage
+
+	// FinishReason is why generation ended, as reported by the backend:
+	// "stop" (natural end), "length" (hit the generation limit — the
+	// response is an incomplete stump, and any tool call the model was
+	// building was silently discarded), "tool_calls", or "" when the
+	// backend didn't say. The agent loop must never treat a "length"
+	// response without tool calls as a deliberate finish — live shape:
+	// a backend cut a worker off after 38 tokens of preamble and the
+	// loop accepted "Let me write the file…" as the final answer.
+	FinishReason string
 }
 
 // Client talks to exactly one backend. Implementations own everything

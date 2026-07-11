@@ -5,3 +5,6 @@ temp/
 dump.txt
 dump.bat
 agent-debug.log
+agent-frontend.log
+agent-backend.log
+plan.md

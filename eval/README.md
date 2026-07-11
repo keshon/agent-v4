@@ -55,6 +55,7 @@ Each prompt file lists recommended flags. Save task id from output; inspect
 | `run_shell` for `npm run dev` | long-process trap |
 | Hits max steps (25) | stuck or over-exploring |
 | `-verify-cmd` FAILED but agent says done | verify gate should block — bug |
+| "Let me write/do X" then nothing executes | check debug log for `finish_reason: "length"` — backend truncation; the loop should nudge and continue, not accept it |
 
 **Pass** = task actually done (check disk / command output), ≤ reasonable
 steps for a weak model (see each prompt), no regression traps in the table.

@@ -14,6 +14,8 @@ Rules:
   {"type":"http","url":"URL"} — URL must return HTTP 200. Only for subtasks that leave a server running.
   {"type":"none"} — only for subtasks that change no files.
 - Every subtask that creates or modifies files MUST have a check other than "none".
+- Each subtask must have a DIFFERENT check. A check identical to an earlier subtask's check verifies nothing new.
+- If several subtasks would write to the same file, merge them into ONE subtask — one document or one code file is one subtask, not four.
 - When the workspace listing shows a build system (go.mod, package.json with scripts, Makefile), prefer a shell check that builds or tests over file_exists for code files — a file can exist and still not compile.
 - Never create a subtask whose only job is to read, analyze, review, or understand something. Workers read whatever they need on their own, and anything a worker "understands" is lost when it finishes — only files survive. Fold the reading into the subtask that produces the file.
 - Only rely on build tools you can see evidence of in the workspace file listing.

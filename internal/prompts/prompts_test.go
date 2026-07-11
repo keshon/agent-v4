@@ -21,6 +21,7 @@ func TestAllPromptsLoadNonEmpty(t *testing.T) {
 		"BudgetNotice":      BudgetNotice,
 		"SearchFatigue":     SearchFatigue,
 		"ToolLoop":          ToolLoop,
+		"Truncated":         Truncated,
 		"CompactNotice":     CompactNotice,
 		"VerifyFailedContinue": VerifyFailedContinue,
 		"MissionPlan":       MissionPlan,

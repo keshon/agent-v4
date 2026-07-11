@@ -118,6 +118,12 @@ func parseAndValidate(raw string, existing map[string]bool) (subtasks []Subtask,
 		return nil, nil, []string{fmt.Sprintf("plan has %d subtasks, maximum is 8", len(subtasks))}
 	}
 
+	// A check identical to an earlier subtask's check cannot distinguish
+	// its own subtask's work — live shape: four subtasks all checked
+	// "file_exists: plan.md", so once s1 created the file, s2-s4 were
+	// unverifiable.
+	checkOwner := make(map[string]string)
+
 	for i := range subtasks {
 		s := &subtasks[i]
 		// IDs and statuses are harness-owned — overwrite instead of
@@ -139,6 +145,18 @@ func parseAndValidate(raw string, existing map[string]bool) (subtasks []Subtask,
 		}
 
 		errs = append(errs, validateCheck(s, existing)...)
+
+		if s.Check.Type != "" && s.Check.Type != "none" {
+			fp := s.Check.Type + "|" + s.Check.Cmd + "|" + normalizePlanPath(s.Check.Path) + "|" + s.Check.URL
+			if owner, dup := checkOwner[fp]; dup {
+				errs = append(errs, fmt.Sprintf("%s: has the same check as %s — a check must verify its "+
+					"OWN subtask's work. Merge the two subtasks into one, or give this one a check that "+
+					"detects its specific contribution (e.g. a shell grep/findstr for the content it adds)",
+					s.ID, owner))
+			} else {
+				checkOwner[fp] = s.ID
+			}
+		}
 
 		// files_hint paths that don't exist yet are fine — most plans
 		// create files — but they must be surfaced to the human as

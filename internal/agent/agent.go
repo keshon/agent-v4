@@ -66,6 +66,16 @@ type Config struct {
 	// exactly the kind of mistake this catches some of the time.
 	SkipVerify bool
 
+	// VerifyOnZeroWrites, when set alongside SkipVerify, still runs the
+	// self-check round if the run is about to finish with zero successful
+	// MutatingTools calls. Mission workers use this: their correctness is
+	// checked mechanically afterwards (so the general verify round is
+	// redundant), but a worker that announces "let me write the file" and
+	// finishes without writing is best corrected HERE, while its analysis
+	// is still in context — one nudge now beats a fresh fix worker that
+	// has to rediscover everything.
+	VerifyOnZeroWrites bool
+
 	// OnStep, if set, is called after every model response — for
 	// logging/debugging without baking observability into the loop.
 	OnStep func(step int, msg llm.Message)
@@ -300,6 +310,30 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		a.saveState(history)
 
 		if len(resp.Message.ToolCalls) == 0 {
+			// finish_reason "length" means the backend cut generation off
+			// and discarded whatever the model was building — usually the
+			// tool call it had just announced. That's a truncation, never a
+			// finish: treating the stump as an answer is how a live run
+			// "finished" a subtask with "Let me write the plan.md file…"
+			// and zero writes. Nudge and continue; escalate via the stuck
+			// counter so a backend that truncates every response is still
+			// bounded by MaxStuckSteps → MaxSteps.
+			if resp.FinishReason == "length" {
+				history = append(history, llm.Message{
+					Role:    llm.RoleUser,
+					Content: prompts.Truncated,
+				})
+				st.stuckSteps++
+				if st.stuckSteps >= a.cfg.MaxStuckSteps {
+					history = append(history, llm.Message{
+						Role:    llm.RoleUser,
+						Content: prompts.StuckFailing,
+					})
+					st.stuckSteps = 0
+				}
+				continue
+			}
+
 			// A model can write text that *looks* like a tool call
 			// ("<|tool_call>call:write_file{...}") instead of making a
 			// real structured one. Nothing executes, but the model often
@@ -332,7 +366,9 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 				continue
 			}
 
-			if !a.cfg.SkipVerify && !st.verifiedOnce {
+			verifyWanted := !a.cfg.SkipVerify ||
+				(a.cfg.VerifyOnZeroWrites && st.mutatingSucceeded == 0)
+			if verifyWanted && !st.verifiedOnce {
 				st.verifiedOnce = true
 				verifyMsg := prompts.Verify
 				if st.mutatingSucceeded == 0 {
