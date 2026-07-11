@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"agent-v4/internal/agent"
 )
@@ -30,17 +31,20 @@ type Delegate struct {
 	// MaxConcurrent caps parallel delegate_task calls. Zero means 3.
 	MaxConcurrent int
 
-	sem chan struct{}
+	sem     chan struct{}
+	semOnce sync.Once
 }
 
-func (Delegate) Name() string { return "delegate_task" }
+// All methods are pointer receivers: Delegate embeds a sync.Once, and a
+// value receiver would copy it (go vet: "passes lock by value").
+func (*Delegate) Name() string { return "delegate_task" }
 
 // Mode is Concurrent: delegate_task is explicitly for self-contained,
 // independent subtasks (see the system prompt's guidance to issue
 // multiple delegate_task calls in one step) — running them concurrently
 // is the entire reason that pattern exists.
-func (Delegate) Mode() agent.ToolMode { return agent.Concurrent }
-func (Delegate) Description() string {
+func (*Delegate) Mode() agent.ToolMode { return agent.Concurrent }
+func (*Delegate) Description() string {
 	return "Delegate a self-contained subtask to a fresh subagent and return its final result. " +
 		"Use this for work that can be fully described in one instruction and doesn't need the " +
 		"current conversation's context. Optionally set role to specialize the subagent for this " +
@@ -49,7 +53,7 @@ func (Delegate) Description() string {
 		"specialist', or 'Alice, a software engineer who loves tea'). This actually shapes how " +
 		"the subagent behaves, not just text embedded in the task description."
 }
-func (Delegate) Schema() json.RawMessage {
+func (*Delegate) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -60,15 +64,18 @@ func (Delegate) Schema() json.RawMessage {
 	}`)
 }
 
+// semaphore lazily builds the shared slot channel. sync.Once matters:
+// delegate_task is a Concurrent-mode tool, so several calls in one step
+// hit this from separate goroutines — unsynchronized lazy init let each
+// racer build its own channel, silently voiding the concurrency cap.
 func (d *Delegate) semaphore() chan struct{} {
-	if d.sem != nil {
-		return d.sem
-	}
-	capacity := d.MaxConcurrent
-	if capacity <= 0 {
-		capacity = defaultMaxConcurrentDelegates
-	}
-	d.sem = make(chan struct{}, capacity)
+	d.semOnce.Do(func() {
+		capacity := d.MaxConcurrent
+		if capacity <= 0 {
+			capacity = defaultMaxConcurrentDelegates
+		}
+		d.sem = make(chan struct{}, capacity)
+	})
 	return d.sem
 }
 

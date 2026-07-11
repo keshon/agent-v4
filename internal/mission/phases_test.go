@@ -115,6 +115,8 @@ func TestRunner_CheckFailure_FailsLoudlyWithFacts(t *testing.T) {
 		text("I have created index.html and it works great!"), // classic fake-save: no tool calls
 	}}
 	r, _ := newRunner(t, client)
+	r.MaxFixAttempts = -1 // isolate the check-failure path from the fix loop
+	r.MaxReplans = -1
 
 	m := &Mission{ID: "t2", Task: "make a hello page", Phase: PhasePlan}
 	report, err := r.Run(context.Background(), m)
@@ -525,6 +527,62 @@ func TestRunner_Review_GapsWithoutBudgetStillFinishes(t *testing.T) {
 	}
 	if !strings.Contains(report, "review flagged unresolved gaps") {
 		t.Fatalf("report must record the unresolved gaps honestly:\n%s", report)
+	}
+}
+
+// Live failure shape (2026-07-11): koboldcpp died mid-mission and the
+// resulting connection errors burned 2 fix attempts and the replan budget
+// in seconds, each recorded as a "failed attempt". Infra failures must
+// stop the mission resumably instead.
+func TestRunner_BackendDeath_StopsResumablyWithoutBurningBudgets(t *testing.T) {
+	client := &runnerClient{responses: []llm.ChatResponse{
+		text(validPlanJSON),
+		// worker's first call: no scripted response → runnerClient errors,
+		// exactly like a dead backend
+	}}
+	r, dir := newRunner(t, client)
+
+	m := &Mission{ID: "i1", Task: "make a hello page", Phase: PhasePlan}
+	_, err := r.Run(context.Background(), m)
+	if err == nil || !strings.Contains(err.Error(), "backend failure") {
+		t.Fatalf("err = %v, want backend-failure error", err)
+	}
+
+	if m.Phase != PhaseExecute {
+		t.Fatalf("Phase = %s, want execute — infra death must stay resumable, not become failed", m.Phase)
+	}
+	sub := m.Subtasks[0]
+	if sub.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1 — connection errors must not consume fix attempts", sub.Attempts)
+	}
+	if m.Replans != 0 {
+		t.Fatalf("Replans = %d, want 0", m.Replans)
+	}
+	if sub.Status != StatusRunning {
+		t.Fatalf("Status = %s, want running (resume continues this worker)", sub.Status)
+	}
+
+	// The persisted ledger reflects the same resumable state.
+	saved, lerr := Load(dir)
+	if lerr != nil {
+		t.Fatalf("Load: %v", lerr)
+	}
+	if saved.Phase != PhaseExecute || saved.Subtasks[0].Status != StatusRunning {
+		t.Fatalf("persisted state not resumable: phase=%s status=%s", saved.Phase, saved.Subtasks[0].Status)
+	}
+}
+
+func TestRunner_BackendDeathDuringPlanning_LeavesPhasePlan(t *testing.T) {
+	client := &runnerClient{} // every call fails
+	r, _ := newRunner(t, client)
+
+	m := &Mission{ID: "i2", Task: "task", Phase: PhasePlan}
+	_, err := r.Run(context.Background(), m)
+	if err == nil || !strings.Contains(err.Error(), "backend failure") {
+		t.Fatalf("err = %v, want backend-failure error", err)
+	}
+	if m.Phase != PhasePlan {
+		t.Fatalf("Phase = %s, want plan — resume should retry planning", m.Phase)
 	}
 }
 

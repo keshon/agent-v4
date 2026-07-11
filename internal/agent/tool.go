@@ -104,3 +104,24 @@ func (r *Registry) ModeOf(name string) ToolMode {
 	}
 	return Exclusive
 }
+
+// IdempotentOf reports whether a tool has declared (via an optional
+// `Idempotent() bool` method) that identical calls return identical
+// results as long as nothing has mutated the workspace in between —
+// true for pure reads (read_file, list_files, grep_files), never for
+// tools whose results vary over time (check_url, check_background) or
+// that have side effects (delegate_task). The loop uses this to
+// short-circuit exact-repeat calls: a weak model re-issuing the same
+// read five times in a row gets told it's repeating instead of
+// re-filling its context with the same bytes. Default is false — a tool
+// must opt in.
+func (r *Registry) IdempotentOf(name string) bool {
+	t, ok := r.tools[name]
+	if !ok {
+		return false
+	}
+	if it, ok := t.(interface{ Idempotent() bool }); ok {
+		return it.Idempotent()
+	}
+	return false
+}

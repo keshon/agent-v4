@@ -21,11 +21,18 @@ type ReadFile struct{ WS *workspace.Workspace }
 
 func (ReadFile) Name() string { return "read_file" }
 func (ReadFile) Description() string {
-	return "Read a text file. Returns a FILE header (path, size, truncated, binary) and body. " +
-		"Set metadata_only or max_bytes=0 to get only the header — use this for file size or " +
+	return "Read a text file. Returns a FILE header (path, size, truncated, binary) and the full " +
+		"content. Set metadata_only=true to get only the header — use this for file size or " +
 		"type checks without loading content into context."
 }
 func (ReadFile) Mode() agent.ToolMode { return agent.Concurrent }
+
+// Idempotent: identical read_file calls return identical results until
+// something mutates the workspace — the agent loop uses this to
+// short-circuit exact-repeat calls instead of re-reading (see
+// Registry.IdempotentOf).
+func (ReadFile) Idempotent() bool { return true }
+
 func (ReadFile) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",
@@ -37,7 +44,7 @@ func (ReadFile) Schema() json.RawMessage {
 			},
 			"max_bytes": {
 				"type": "integer",
-				"description": "optional cap on body bytes; 0 means metadata only (same as metadata_only)"
+				"description": "optional cap on content bytes; omit or 0 for the full content"
 			}
 		},
 		"required": ["path"]
@@ -69,6 +76,13 @@ func (t ReadFile) Run(_ context.Context, args json.RawMessage) (string, error) {
 	}
 	rel, _ := filepath.Rel(t.WS.Root(), full)
 
+	// max_bytes=0 (or omitted) means "no explicit cap", NOT metadata-only:
+	// every model tested reads 0 as the universal "unlimited" convention.
+	// The old 0-means-header-only semantics sent a weak model into a
+	// repeat loop — 18 identical header-only reads in one live run,
+	// because it kept asking for content with max_bytes=0 and kept
+	// getting four lines of metadata. Header-only is spelled
+	// metadata_only=true and nothing else.
 	maxBody := readMaxBytes
 	if in.MetadataOnly {
 		maxBody = 0
@@ -76,7 +90,9 @@ func (t ReadFile) Run(_ context.Context, args json.RawMessage) (string, error) {
 		if *in.MaxBytes < 0 {
 			return "", fmt.Errorf("max_bytes must be >= 0")
 		}
-		maxBody = *in.MaxBytes
+		if *in.MaxBytes > 0 {
+			maxBody = *in.MaxBytes
+		}
 	}
 	return formatReadFileResult(rel, data, maxBody), nil
 }
@@ -177,6 +193,7 @@ type ListFiles struct{ WS *workspace.Workspace }
 
 func (ListFiles) Name() string         { return "list_files" }
 func (ListFiles) Mode() agent.ToolMode { return agent.Concurrent }
+func (ListFiles) Idempotent() bool     { return true }
 func (ListFiles) Description() string {
 	return "List files and directories under a path, non-recursively."
 }

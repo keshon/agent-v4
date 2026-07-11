@@ -100,7 +100,12 @@ func TestReadFile_MetadataOnly_NoBody(t *testing.T) {
 	}
 }
 
-func TestReadFile_MaxBytesZero_SameAsMetadataOnly(t *testing.T) {
+// max_bytes=0 must mean "no explicit cap" — every model reads 0 as the
+// universal "unlimited" convention. The original 0-means-header-only
+// semantics sent a live Qwen run into an 18-repeat read loop: it kept
+// asking for content with max_bytes=0 and kept getting a contentless
+// header it couldn't understand.
+func TestReadFile_MaxBytesZero_ReturnsFullContent(t *testing.T) {
 	dir := t.TempDir()
 	ws, _ := workspace.New(dir)
 	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello"), 0o644)
@@ -111,7 +116,22 @@ func TestReadFile_MaxBytesZero_SameAsMetadataOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if strings.Contains(out, "hello") || strings.Contains(out, "----") {
-		t.Fatalf("max_bytes=0 should return header only, got: %q", out)
+	if !strings.Contains(out, "hello") {
+		t.Fatalf("max_bytes=0 must return the full content, got: %q", out)
+	}
+}
+
+func TestReadFile_MaxBytesPositive_CapsContent(t *testing.T) {
+	dir := t.TempDir()
+	ws, _ := workspace.New(dir)
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello world"), 0o644)
+
+	args, _ := json.Marshal(map[string]any{"path": "f.txt", "max_bytes": 5})
+	out, err := ReadFile{WS: ws}.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "hello") || strings.Contains(out, "world") {
+		t.Fatalf("max_bytes=5 should cap at 5 bytes, got: %q", out)
 	}
 }

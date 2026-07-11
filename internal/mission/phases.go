@@ -131,6 +131,9 @@ func (r *Runner) Run(ctx context.Context, m *Mission) (string, error) {
 
 		case PhasePlan:
 			if err := r.runPlan(ctx, m); err != nil {
+				if errors.Is(err, errInfra) {
+					return m.RenderReport(), err // phase unchanged; resume re-plans
+				}
 				return r.fail(m, "planning: %v", err)
 			}
 
@@ -158,12 +161,19 @@ func (r *Runner) Run(ctx context.Context, m *Mission) (string, error) {
 			if err == nil {
 				continue
 			}
+			if errors.Is(err, errInfra) {
+				r.event("mission interrupted: %v", err)
+				return m.RenderReport(), err // phase stays execute; resume continues here
+			}
 			if !errors.Is(err, errSubtaskFailed) {
 				return r.fail(m, "subtask %s: %v", sub.ID, err)
 			}
 			// Check failed and fix attempts are exhausted — the one
 			// remaining lever is a new plan for the remaining work.
 			if rerr := r.tryReplan(ctx, m, err.Error()); rerr != nil {
+				if errors.Is(rerr, errInfra) {
+					return m.RenderReport(), rerr
+				}
 				return r.fail(m, "subtask %s: %v; %v", sub.ID, err, rerr)
 			}
 
@@ -172,6 +182,9 @@ func (r *Runner) Run(ctx context.Context, m *Mission) (string, error) {
 			if len(regressions) > 0 {
 				reason := "final verification failed:\n" + strings.Join(regressions, "\n")
 				if rerr := r.tryReplan(ctx, m, reason); rerr != nil {
+					if errors.Is(rerr, errInfra) {
+						return m.RenderReport(), rerr
+					}
 					return r.fail(m, "%s; %v", reason, rerr)
 				}
 				continue
@@ -339,6 +352,13 @@ func planAttemptLabel(revision int) string {
 // terminating. Wrapped errors carry the failing check output as evidence.
 var errSubtaskFailed = errors.New("subtask failed its check")
 
+// errInfra marks failures of the machinery itself — a dead backend, a
+// network error — as opposed to failures of the work. Infra errors stop
+// the mission WITHOUT moving it to PhaseFailed and without consuming fix
+// or replan budgets: the ledger stays exactly where it was, and -resume
+// continues from that point once the backend is back.
+var errInfra = errors.New("backend failure")
+
 func (r *Runner) runSubtask(ctx context.Context, m *Mission, sub *Subtask) error {
 	// StatusRunning on entry means the process died mid-worker last time —
 	// the one situation where the newest saved transcript should be
@@ -423,6 +443,17 @@ func (r *Runner) attempt(ctx context.Context, m *Mission, sub *Subtask, seed str
 	}
 	sub.Summary = agent.TruncateMiddle(strings.TrimSpace(result), maxSummaryChars)
 
+	// A worker error that ISN'T max-steps is infrastructure, not work: a
+	// dead backend, a network failure. Fix workers and replans can't fix a
+	// backend — spending their budgets on connection errors just converts
+	// an outage into a fake string of "failed attempts" (live shape: a
+	// koboldcpp crash mid-mission burned 2 fix attempts + the replan in
+	// seconds). Stop the mission cleanly instead; it resumes exactly here.
+	if runErr != nil && !errors.Is(runErr, agent.ErrMaxSteps) {
+		_ = m.Save(r.Dir)
+		return "", false, fmt.Errorf("%w (resume with -resume when the backend is back): %v", errInfra, runErr)
+	}
+
 	// The check is the verdict — not the worker's exit status. A worker
 	// that hit MaxSteps but finished the actual work still passes; a
 	// worker that returned a confident report over an empty file fails.
@@ -445,8 +476,7 @@ func (r *Runner) tryReplan(ctx context.Context, m *Mission, reason string) error
 	if m.Replans >= r.maxReplans() {
 		return fmt.Errorf("replan budget exhausted (%d used)", m.Replans)
 	}
-	m.Replans++
-	r.event("replanning (%d/%d)", m.Replans, r.maxReplans())
+	r.event("replanning (%d/%d)", m.Replans+1, r.maxReplans())
 
 	listing, existing := WorkspaceListing(r.WS)
 	editNote := ""
@@ -486,6 +516,9 @@ func (r *Runner) tryReplan(ctx context.Context, m *Mission, reason string) error
 			}
 		}
 
+		// The budget is spent only when a new plan actually commits — a
+		// replan aborted by a dead backend must not consume it.
+		m.Replans++
 		m.Cursor = len(m.Subtasks)
 		m.Subtasks = append(m.Subtasks, newSubs...)
 		m.Phase = PhaseExecute

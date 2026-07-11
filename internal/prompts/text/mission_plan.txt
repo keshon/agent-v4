@@ -9,10 +9,12 @@ Rules:
 - acceptance is 1-5 short statements that are objectively checkable by looking at files or running the project.
 - files_hint lists the file paths this subtask will create or modify.
 - check is how the harness verifies the subtask mechanically after the work is done. Pick exactly one:
-  {"type":"file_exists","path":"FILE"} — FILE must exist and be non-empty. The simplest and usually the right choice.
-  {"type":"shell","cmd":"COMMAND"} — COMMAND must exit 0 only if the work is correct. Never use echo or another command that always succeeds.
+  {"type":"file_exists","path":"FILE"} — FILE must be a NEW file this subtask creates. It must not already exist in the workspace listing, and it must be a file, not a directory. Simplest choice for new files.
+  {"type":"shell","cmd":"COMMAND"} — COMMAND must exit 0 only if the work is correct. Required when the subtask MODIFIES existing files (a build/test command, or grep/findstr proving the new content). Never use echo, ls, dir, or another command that always succeeds.
   {"type":"http","url":"URL"} — URL must return HTTP 200. Only for subtasks that leave a server running.
   {"type":"none"} — only for subtasks that change no files.
 - Every subtask that creates or modifies files MUST have a check other than "none".
-- Only rely on build tools you can see evidence of in the workspace file listing. When in doubt, use file_exists.
+- When the workspace listing shows a build system (go.mod, package.json with scripts, Makefile), prefer a shell check that builds or tests over file_exists for code files — a file can exist and still not compile.
+- Never create a subtask whose only job is to read, analyze, review, or understand something. Workers read whatever they need on their own, and anything a worker "understands" is lost when it finishes — only files survive. Fold the reading into the subtask that produces the file.
+- Only rely on build tools you can see evidence of in the workspace file listing.
 - Plan exactly what the task asks for — no extra features.

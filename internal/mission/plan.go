@@ -86,7 +86,10 @@ func generateSubtasks(ctx context.Context, client llm.Client, messages []llm.Mes
 			MaxTokens:   req.MaxTokens,
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("plan call: %w", err)
+			// A chat failure here is the backend, not the plan — mark it
+			// infra so the Runner stops resumably instead of failing the
+			// mission (or burning the replan budget it was called with).
+			return nil, nil, fmt.Errorf("%w: plan call: %v", errInfra, err)
 		}
 		lastRaw = resp.Message.Content
 
@@ -135,13 +138,13 @@ func parseAndValidate(raw string, existing map[string]bool) (subtasks []Subtask,
 			errs = append(errs, fmt.Sprintf("%s: no acceptance criteria", s.ID))
 		}
 
-		errs = append(errs, validateCheck(s)...)
+		errs = append(errs, validateCheck(s, existing)...)
 
 		// files_hint paths that don't exist yet are fine — most plans
 		// create files — but they must be surfaced to the human as
 		// new-file intents, never silently trusted as existing.
 		for _, p := range s.FilesHint {
-			if !existing[strings.TrimPrefix(strings.ReplaceAll(p, "\\", "/"), "./")] {
+			if !existing[normalizePlanPath(p)] {
 				warnings = append(warnings, fmt.Sprintf("%s: %s does not exist yet (will be created)", s.ID, p))
 			}
 		}
@@ -149,7 +152,7 @@ func parseAndValidate(raw string, existing map[string]bool) (subtasks []Subtask,
 	return subtasks, warnings, errs
 }
 
-func validateCheck(s *Subtask) (errs []string) {
+func validateCheck(s *Subtask, existing map[string]bool) (errs []string) {
 	c := s.Check
 	switch c.Type {
 	case "none":
@@ -158,8 +161,24 @@ func validateCheck(s *Subtask) (errs []string) {
 				s.ID, strings.Join(s.FilesHint, ", ")))
 		}
 	case "file_exists":
-		if strings.TrimSpace(c.Path) == "" {
+		path := normalizePlanPath(c.Path)
+		switch {
+		case strings.TrimSpace(path) == "":
 			errs = append(errs, fmt.Sprintf("%s: file_exists check has no path", s.ID))
+		case existing[path]:
+			// Live failure shape: a plan checked file_exists on plan.md,
+			// which already existed — the subtask "passed" having done
+			// nothing. A check that is already true before any work
+			// verifies nothing.
+			errs = append(errs, fmt.Sprintf("%s: file_exists check on %q verifies nothing — the file "+
+				"already exists. Point it at a file this subtask CREATES, or use a shell check that "+
+				"proves the change (a build/test command, or grep/findstr for the new content)", s.ID, c.Path))
+		case isDirOf(existing, path):
+			// Live failure shape: a plan checked file_exists on
+			// internal/tools (a directory) — unsatisfiable, and the fix
+			// loop burned three workers trying to satisfy it.
+			errs = append(errs, fmt.Sprintf("%s: file_exists check path %q is a directory — "+
+				"the check can never pass. Name a specific file", s.ID, c.Path))
 		}
 	case "shell":
 		cmd := strings.TrimSpace(strings.ToLower(c.Cmd))
@@ -176,6 +195,24 @@ func validateCheck(s *Subtask) (errs []string) {
 		errs = append(errs, fmt.Sprintf("%s: unknown check type %q", s.ID, c.Type))
 	}
 	return errs
+}
+
+// normalizePlanPath makes a model-written path comparable against the
+// walk-produced existing-files set: forward slashes, no ./ prefix.
+func normalizePlanPath(p string) string {
+	return strings.TrimPrefix(strings.ReplaceAll(p, "\\", "/"), "./")
+}
+
+// isDirOf reports whether path is a directory, judged purely from the
+// existing-files set: it's a directory iff some real file lives under it.
+func isDirOf(existing map[string]bool, path string) bool {
+	prefix := strings.TrimRight(path, "/") + "/"
+	for f := range existing {
+		if strings.HasPrefix(f, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // vacuousShellCheck flags commands that succeed regardless of whether any

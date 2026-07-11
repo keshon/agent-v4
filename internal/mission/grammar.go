@@ -26,11 +26,16 @@ package mission
 // PlanGrammar constrains a planning response to a flat subtask list —
 // at most 8 subtasks, each with bounded string lengths, at most 5
 // acceptance criteria / file hints, and a typed check.
+// acceptance uses accarr (at least one string, grammar-enforced): a live
+// Qwen replan emitted `"acceptance": []` twice in a row and burned both
+// generation attempts on the same validator rejection — making the empty
+// array unrepresentable is cheaper than explaining it.
 const PlanGrammar = `root ::= "{" ws "\"subtasks\"" ws ":" ws "[" ws subtask (ws "," ws subtask){0,7} ws "]" ws "}"
-subtask ::= "{" ws "\"id\"" ws ":" ws str "," ws "\"milestone\"" ws ":" ws str "," ws "\"title\"" ws ":" ws str "," ws "\"goal\"" ws ":" ws str "," ws "\"acceptance\"" ws ":" ws strarr "," ws "\"files_hint\"" ws ":" ws strarr "," ws "\"check\"" ws ":" ws check ws "}"
+subtask ::= "{" ws "\"id\"" ws ":" ws str "," ws "\"milestone\"" ws ":" ws str "," ws "\"title\"" ws ":" ws str "," ws "\"goal\"" ws ":" ws str "," ws "\"acceptance\"" ws ":" ws accarr "," ws "\"files_hint\"" ws ":" ws strarr "," ws "\"check\"" ws ":" ws check ws "}"
 check ::= "{" ws "\"type\"" ws ":" ws checktype (ws "," ws checkarg)? ws "}"
 checktype ::= "\"shell\"" | "\"file_exists\"" | "\"http\"" | "\"none\""
 checkarg ::= ("\"cmd\"" | "\"path\"" | "\"url\"") ws ":" ws str
+accarr ::= "[" ws str (ws "," ws str){0,4} ws "]"
 strarr ::= "[" ws (str (ws "," ws str){0,4})? ws "]"
 str ::= "\"" schar{1,300} "\""
 schar ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt/] | "u" [0-9a-fA-F]{4})

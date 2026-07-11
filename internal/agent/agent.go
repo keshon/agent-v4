@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -262,6 +263,13 @@ type runState struct {
 	emptyFinishRetried                                                                 bool
 	lastSignature, verifyFailedOutput, lastSingleTool string
 	mutatedPaths                                      []string
+
+	// idempotentSeen maps signature (name+args) of successful idempotent
+	// calls to the step that ran them; cleared whenever anything mutates
+	// the workspace. Exact repeats short-circuit to an error result — a
+	// weak model that re-issues the same read five times gets told it's
+	// repeating instead of getting five copies of the same bytes.
+	idempotentSeen map[string]int
 }
 
 func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) {
@@ -381,8 +389,34 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		}
 		results := make([]callResult, len(resp.Message.ToolCalls))
 
+		// Exact repeats of idempotent (pure-read) calls don't re-execute:
+		// nothing has changed, so the result would be byte-identical — and
+		// re-delivering it teaches a weak model nothing while filling the
+		// context with duplicates. The repeat comes back as an *error*
+		// result on purpose: errors don't count as progress, so the stuck
+		// detector keeps escalating if the model won't change course.
+		skipped := make([]bool, len(resp.Message.ToolCalls))
+		for i, call := range resp.Message.ToolCalls {
+			if !a.cfg.Tools.IdempotentOf(call.Name) {
+				continue
+			}
+			sig := call.Name + ":" + string(call.Arguments)
+			if prev, seen := st.idempotentSeen[sig]; seen {
+				skipped[i] = true
+				results[i] = callResult{err: fmt.Errorf(
+					"this exact %s call (same arguments) already ran in step %d and nothing has "+
+						"changed since — its result is still valid, re-read it from the conversation. "+
+						"Do not repeat the call; do something different (different path, different "+
+						"arguments, or move on to acting on what you already know)",
+					call.Name, prev)}
+			}
+		}
+
 		var concurrentIdx, exclusiveIdx []int
 		for i, call := range resp.Message.ToolCalls {
+			if skipped[i] {
+				continue
+			}
 			if a.cfg.Tools.ModeOf(call.Name) == Concurrent {
 				concurrentIdx = append(concurrentIdx, i)
 			} else {
@@ -413,12 +447,22 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 
 		mutatingBefore := st.mutatingSucceeded
 		progressed := false
+		exclusiveSucceeded := false
 		for i, call := range resp.Message.ToolCalls {
 			content := results[i].content
 			if results[i].err != nil {
 				content = "error: " + results[i].err.Error()
 			} else {
 				progressed = true
+				if a.cfg.Tools.ModeOf(call.Name) == Exclusive {
+					exclusiveSucceeded = true
+				}
+				if a.cfg.Tools.IdempotentOf(call.Name) {
+					if st.idempotentSeen == nil {
+						st.idempotentSeen = make(map[string]int)
+					}
+					st.idempotentSeen[call.Name+":"+string(call.Arguments)] = step
+				}
 				if containsStr(a.cfg.MutatingTools, call.Name) {
 					st.mutatingSucceeded++
 					for _, p := range mutatedPathsFromCall(call.Arguments) {
@@ -438,6 +482,13 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 				ToolCallID: call.ID,
 				Content:    content,
 			})
+		}
+
+		// Anything that mutated (an Exclusive call — write/patch/shell — or
+		// a subagent reporting writes) invalidates the repeat cache: the
+		// same read can now legitimately return something new.
+		if exclusiveSucceeded || st.mutatingSucceeded > mutatingBefore {
+			st.idempotentSeen = nil
 		}
 
 		if st.mutatingSucceeded > mutatingBefore {
@@ -480,8 +531,16 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 
 	a.LastRunMutations = st.mutatingSucceeded
 	a.report.MutatedPaths = st.mutatedPaths
-	return "", fmt.Errorf("reached max steps (%d) without finishing", a.cfg.MaxSteps)
+	return "", fmt.Errorf("%w (%d) without finishing", ErrMaxSteps, a.cfg.MaxSteps)
 }
+
+// ErrMaxSteps marks a run that did real work but ran out of step budget —
+// as opposed to infrastructure failures (a dead backend, a network error)
+// where no work happened at all. Callers that retry on failure (the
+// mission fix loop) must distinguish the two: retrying a step-budget
+// death can converge; retrying against a dead backend just burns retry
+// budget on connection errors.
+var ErrMaxSteps = errors.New("reached max steps")
 
 // mutatedPathsFromCall pulls workspace paths out of a mutating tool
 // call's arguments. The project's file tools name them path (write_file,

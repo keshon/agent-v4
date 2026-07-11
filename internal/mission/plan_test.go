@@ -152,6 +152,35 @@ func TestParseAndValidate_StructuralRules(t *testing.T) {
 	}
 }
 
+// Both shapes below are live failures from the 2026-07-11 Qwen run: a
+// check against a directory burned three workers on an unsatisfiable
+// condition, and a check against a pre-existing file auto-passed having
+// verified nothing.
+func TestParseAndValidate_FileExistsOnDirectory_Rejected(t *testing.T) {
+	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"analyze","goal":"g","acceptance":["x"],"files_hint":[],"check":{"type":"file_exists","path":"internal/tools"}}]}`
+	existing := map[string]bool{"internal/tools/registry.go": true, "internal/tools/fs.go": true}
+	_, _, errs := parseAndValidate(plan, existing)
+	if len(errs) == 0 || !strings.Contains(strings.Join(errs, ";"), "is a directory") {
+		t.Fatalf("errs = %v, want directory rejection", errs)
+	}
+}
+
+func TestParseAndValidate_FileExistsOnPreExistingFile_Rejected(t *testing.T) {
+	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"read the plan","goal":"g","acceptance":["x"],"files_hint":["plan.md"],"check":{"type":"file_exists","path":"plan.md"}}]}`
+	_, _, errs := parseAndValidate(plan, map[string]bool{"plan.md": true})
+	if len(errs) == 0 || !strings.Contains(strings.Join(errs, ";"), "verifies nothing") {
+		t.Fatalf("errs = %v, want vacuous-check rejection", errs)
+	}
+}
+
+func TestParseAndValidate_FileExistsOnNewFile_Accepted(t *testing.T) {
+	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"t","goal":"g","acceptance":["x"],"files_hint":["style.css"],"check":{"type":"file_exists","path":"style.css"}}]}`
+	_, _, errs := parseAndValidate(plan, map[string]bool{"index.html": true})
+	if len(errs) != 0 {
+		t.Fatalf("new-file check should be accepted, got: %v", errs)
+	}
+}
+
 func TestParseAndValidate_ExistingFileNoWarning(t *testing.T) {
 	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"t","goal":"g","acceptance":["x"],"files_hint":["main.go"],"check":{"type":"shell","cmd":"go build ./..."}}]}`
 	_, warnings, errs := parseAndValidate(plan, map[string]bool{"main.go": true})
