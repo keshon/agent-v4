@@ -96,8 +96,17 @@ type Probe struct {
 type TraceCheck struct {
 	Tool string `json:"tool"`
 
-	// Mode is "required" or "forbidden".
+	// Mode is "required", "forbidden", or empty when only MaxCalls
+	// applies.
 	Mode string `json:"mode"`
+
+	// MaxCalls caps how many times the tool may be called; zero means no
+	// cap. Several probes' fail conditions are about repetition rather
+	// than presence — "blind patch_file that errors 3+ times without
+	// strategy change", "more than 2 ask_user calls" — and a total step
+	// budget can't express those without also punishing runs that took a
+	// legitimately longer route.
+	MaxCalls int `json:"max_calls,omitempty"`
 
 	// ArgsRegex narrows the check to calls whose JSON arguments match —
 	// run_shell is legitimate in general and forbidden for `ls`, so the
@@ -404,6 +413,10 @@ func checkTrace(p Probe, calls []call) []string {
 			}
 			matched++
 		}
+		if tc.MaxCalls > 0 && matched > tc.MaxCalls {
+			out = append(out, describe(tc,
+				fmt.Sprintf("called %dx, probe allows %d", matched, tc.MaxCalls)))
+		}
 		switch tc.Mode {
 		case "required":
 			if matched == 0 {
@@ -413,6 +426,8 @@ func checkTrace(p Probe, calls []call) []string {
 			if matched > 0 {
 				out = append(out, describe(tc, fmt.Sprintf("called %dx", matched)))
 			}
+		case "":
+			// MaxCalls-only check; presence is not asserted either way.
 		default:
 			out = append(out, fmt.Sprintf("probe %s: unknown trace mode %q", p.Name, tc.Mode))
 		}
