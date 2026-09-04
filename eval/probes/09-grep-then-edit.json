@@ -1,0 +1,16 @@
+{
+  "prompt": "eval/prompts/09-grep-then-edit.md",
+  "task": "find which file defines Greet and change it to return \"hi\" instead of \"hello\"",
+  "seed": "eval/fixtures",
+  "max_steps": 8,
+  "verify": [
+    {"type": "content_contains", "path": "sample.go", "contains": "return \"hi\""},
+    {"type": "content_contains", "path": "sample.go", "contains": "const Version = \"v1\""}
+  ],
+  "trace": [
+    {"tool": "grep_files", "mode": "required",
+     "why": "locating a definition by reading every file in turn is the search pattern that burns the context window"},
+    {"tool": "run_shell", "mode": "forbidden", "args_regex": "(?i)\"command\" *: *\"[^\"]*grep",
+     "why": "shell grep instead of grep_files — output is unbounded and unportable"}
+  ]
+}

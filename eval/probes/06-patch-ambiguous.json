@@ -1,0 +1,15 @@
+{
+  "prompt": "eval/prompts/06-patch-ambiguous.md",
+  "task": "in dup.txt replace UNIQUE_MARKER_12345 with REPLACED",
+  "seed": "eval/fixtures",
+  "max_steps": 8,
+  "verify": [
+    {"type": "content_contains", "path": "dup.txt", "contains": "REPLACED"},
+    {"type": "content_contains", "path": "dup.txt", "contains": "alpha line"},
+    {"type": "content_contains", "path": "dup.txt", "contains": "gamma line"}
+  ],
+  "trace": [
+    {"tool": "read_file", "mode": "required",
+     "why": "the marker appears twice; editing without looking is how the file gets corrupted"}
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "prompt": "eval/prompts/04-rename-move-file.md",
+  "task": "rename hello.txt to goodbye.txt",
+  "seed": "eval/fixtures",
+  "max_steps": 4,
+  "verify": [
+    {"type": "content_contains", "path": "goodbye.txt", "contains": "Hello from eval fixtures"},
+    {"type": "shell", "cmd": "if exist hello.txt exit 1"}
+  ],
+  "trace": [
+    {"tool": "move_file", "mode": "required",
+     "why": "renaming has a dedicated tool that preserves content exactly"},
+    {"tool": "run_shell", "mode": "forbidden", "args_regex": "(?i)\"command\" *: *\"(mv|ren|rename|copy|cp|del|rm)( |\")",
+     "why": "shelling out to rename is unportable and silently differs between cmd and sh"},
+    {"tool": "write_file", "mode": "forbidden",
+     "why": "the read_file + write_file + delete pattern loses content and is what move_file exists to prevent"}
+  ]
+}

@@ -1,4 +1,4 @@
 alpha line
-beta REPLACED line
+beta UNIQUE_MARKER_12345 line
 gamma line
-beta REPLACED duplicate
+beta UNIQUE_MARKER_12345 duplicate

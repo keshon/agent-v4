@@ -78,6 +78,12 @@ type Probe struct {
 	// Trace is the tool-usage verdict. Every check must pass.
 	Trace []TraceCheck `json:"trace"`
 
+	// Answer asserts on the run's final text. Several probes are about
+	// what got reported rather than what changed on disk — "reports
+	// ~150000 bytes", "correct commit list in the final answer" — and a
+	// read-only probe has no workspace change to assert on at all.
+	Answer []AnswerCheck `json:"answer"`
+
 	// MaxSteps fails a run that took more round-trips than the probe
 	// considers reasonable. Zero disables the limit. Finishing correctly
 	// after twenty steps of thrashing is worth knowing about.
@@ -100,6 +106,17 @@ type TraceCheck struct {
 
 	// Why is quoted in the failure so a red result explains itself
 	// without opening eval/prompts.
+	Why string `json:"why,omitempty"`
+}
+
+// AnswerCheck asserts that the final answer does, or does not, match a
+// pattern. Case-insensitive unless the pattern says otherwise.
+type AnswerCheck struct {
+	Regex string `json:"regex"`
+
+	// Mode is "required" or "forbidden".
+	Mode string `json:"mode"`
+
 	Why string `json:"why,omitempty"`
 }
 
@@ -131,7 +148,28 @@ func main() {
 		"proves very little")
 	outDir := flag.String("out", "eval/results", "directory for results.jsonl and per-run traces")
 	maxTokens := flag.Int("max-tokens", 8192, "generation budget per response")
+	dry := flag.Bool("dry", false, "load and validate every probe, then exit — checking a probe "+
+		"should not cost a model round-trip")
 	flag.Parse()
+
+	if *dry {
+		// Deliberately ignores -only: the point is to validate the whole
+		// set before an overnight run, not the subset you were editing.
+		probes, err := loadProbes(*dir, "")
+		if err != nil {
+			log.Fatalf("load probes: %v", err)
+		}
+		for _, p := range probes {
+			mode := "agent"
+			if p.Mission {
+				mode = "mission"
+			}
+			fmt.Printf("  %-22s %-7s %d verify, %d trace, %d answer, max %d steps\n",
+				p.Name, mode, len(p.Verify), len(p.Trace), len(p.Answer), p.MaxSteps)
+		}
+		fmt.Printf("%d probes OK\n", len(probes))
+		return
+	}
 
 	probes, err := loadProbes(*dir, *only)
 	if err != nil {
@@ -258,6 +296,7 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 		}
 	}
 
+	var answer string
 	if p.Mission {
 		runner := &mission.Runner{
 			Client:       client,
@@ -275,25 +314,57 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 			Task:  p.Task,
 			Phase: mission.PhasePlan,
 		}
-		if _, err := runner.Run(runCtx, m); err != nil {
+		report, err := runner.Run(runCtx, m)
+		answer = report
+		if err != nil {
 			res.RunError = firstLine(err.Error())
 		}
 	} else {
+		// The toolset must match cmd/agent exactly. An eval that runs the
+		// agent without delegate_task and ask_user measures a different
+		// agent than the one that ships — and two probes (11 delegate
+		// trap, 12 ask_user) are specifically about whether those tools
+		// get reached for when they shouldn't be.
+		subTools := tools.Base(ws, procs)
+		spawnSub := func(role string) *agent.Agent {
+			return agent.New(agent.Config{
+				Client:       client,
+				Tools:        subTools,
+				System:       prompts.WithRole(role),
+				MaxSteps:     12,
+				MaxTokens:    maxTokens,
+				ContextLimit: contextLimit,
+				SkipVerify:   true,
+			})
+		}
+		// An eval can't answer a question, and a canned answer that
+		// pretends otherwise would make the probe score the answer rather
+		// than the agent. Say plainly that nobody is there; whether
+		// ask_user was reached for at all is still in the trace, which is
+		// what probe 12 actually scores.
+		askFn := func(string) (string, error) {
+			return "This is an automated evaluation run; no human is available. " +
+				"State your assumption and proceed with the smallest reasonable action.", nil
+		}
 		a := agent.New(agent.Config{
-			Client:       client,
-			Tools:        tools.Base(ws, procs),
+			Client: client,
+			Tools: tools.Base(ws, procs,
+				tools.AskUser{AskFn: askFn}, &tools.Delegate{Spawn: spawnSub}),
 			System:       prompts.System,
 			MaxTokens:    maxTokens,
 			ContextLimit: contextLimit,
 			OnStep:       record,
 		})
-		if _, err := a.Run(runCtx, p.Task); err != nil {
+		final, err := a.Run(runCtx, p.Task)
+		answer = final
+		if err != nil {
 			res.RunError = firstLine(err.Error())
 		}
 	}
 
 	res.Failures = append(res.Failures, checkWorkspace(runCtx, p, ws)...)
 	res.Failures = append(res.Failures, checkTrace(p, calls)...)
+	res.Failures = append(res.Failures, checkAnswer(p, answer)...)
 	if p.MaxSteps > 0 && res.Steps > p.MaxSteps {
 		res.Failures = append(res.Failures,
 			fmt.Sprintf("took %d steps, probe allows %d", res.Steps, p.MaxSteps))
@@ -347,6 +418,36 @@ func checkTrace(p Probe, calls []call) []string {
 		}
 	}
 	return out
+}
+
+func checkAnswer(p Probe, answer string) []string {
+	var out []string
+	for _, ac := range p.Answer {
+		// Case-insensitive by default: these assert on prose a model
+		// wrote, and "150000 Bytes" is the same answer as "150000 bytes".
+		re, err := regexp.Compile("(?i)" + ac.Regex)
+		if err != nil {
+			out = append(out, fmt.Sprintf("bad answer regex %q: %v", ac.Regex, err))
+			continue
+		}
+		hit := re.MatchString(answer)
+		switch {
+		case ac.Mode == "required" && !hit:
+			out = append(out, explain("answer does not match "+ac.Regex, ac.Why))
+		case ac.Mode == "forbidden" && hit:
+			out = append(out, explain("answer matches "+ac.Regex, ac.Why))
+		case ac.Mode != "required" && ac.Mode != "forbidden":
+			out = append(out, fmt.Sprintf("probe %s: unknown answer mode %q", p.Name, ac.Mode))
+		}
+	}
+	return out
+}
+
+func explain(what, why string) string {
+	if why != "" {
+		return what + " — " + why
+	}
+	return what
 }
 
 func describe(tc TraceCheck, what string) string {
@@ -437,8 +538,8 @@ func loadProbes(dir, only string) ([]Probe, error) {
 		}
 		// A probe with nothing to assert passes unconditionally, which is
 		// worse than not having the probe at all.
-		if len(p.Verify) == 0 && len(p.Trace) == 0 && p.MaxSteps == 0 {
-			return nil, fmt.Errorf("%s: no verify, trace or max_steps — it would score itself", path)
+		if len(p.Verify) == 0 && len(p.Trace) == 0 && len(p.Answer) == 0 && p.MaxSteps == 0 {
+			return nil, fmt.Errorf("%s: nothing asserted — it would score itself", path)
 		}
 		p.Name = name
 		out = append(out, p)

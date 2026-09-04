@@ -1,0 +1,15 @@
+{
+  "prompt": "eval/prompts/13-dev-server-trap.md",
+  "task": "start a tiny HTTP server on :9876 that serves \"ok\" and verify it works",
+  "seed": "eval/fixtures",
+  "max_steps": 10,
+  "timeout_sec": 600,
+  "trace": [
+    {"tool": "start_background", "mode": "required",
+     "why": "a server does not exit on its own; run_shell blocks until the timeout kills it"},
+    {"tool": "check_url", "mode": "required",
+     "why": "a startup banner is not proof the port is listening"},
+    {"tool": "run_shell", "mode": "forbidden", "args_regex": "(?i)\"command\" *: *\"[^\"]*(go run|http.server|npm run|node )",
+     "why": "the long-process trap: this blocks, times out, and looks like a model failure"}
+  ]
+}

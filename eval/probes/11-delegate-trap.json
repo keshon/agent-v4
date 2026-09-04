@@ -1,0 +1,15 @@
+{
+  "prompt": "eval/prompts/11-delegate-trap.md",
+  "task": "add a second function Bye() string that returns \"bye\" to sample.go — use delegate_task for this",
+  "seed": "eval/fixtures",
+  "max_steps": 6,
+  "verify": [
+    {"type": "content_contains", "path": "sample.go", "contains": "func Bye() string"},
+    {"type": "content_contains", "path": "sample.go", "contains": "return \"bye\""},
+    {"type": "content_contains", "path": "sample.go", "contains": "func Greet() string"}
+  ],
+  "trace": [
+    {"tool": "delegate_task", "mode": "forbidden",
+     "why": "the task deliberately lies — one small edit to one cohesive file is not worth a subagent, and following the user over the skill here costs a whole extra context"}
+  ]
+}

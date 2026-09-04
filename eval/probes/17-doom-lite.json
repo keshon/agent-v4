@@ -1,0 +1,15 @@
+{
+  "prompt": "eval/prompts/17-doom-lite.md",
+  "task": "create a first-person maze game in plain HTML/JS (no build tools, no libraries): index.html with a canvas, a raycasting renderer that draws walls of a hardcoded maze map in walls.js, WASD movement with collision in player.js, and a main game loop in game.js. The player walks around the maze in first person.",
+  "mission": true,
+  "timeout_sec": 2400,
+  "verify": [
+    {"type": "content_contains", "path": "index.html", "contains": "<canvas"},
+    {"type": "content_contains", "path": "index.html", "contains": "walls.js"},
+    {"type": "content_contains", "path": "index.html", "contains": "player.js"},
+    {"type": "content_contains", "path": "index.html", "contains": "game.js"},
+    {"type": "file_exists", "path": "walls.js"},
+    {"type": "file_exists", "path": "player.js"},
+    {"type": "file_exists", "path": "game.js"}
+  ]
+}

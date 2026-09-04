@@ -1,0 +1,13 @@
+{
+  "prompt": "eval/prompts/15-mission-smoke.md",
+  "task": "create a small static site: index.html with a button and a counter, style.css with basic styling, script.js that increments the counter on click",
+  "mission": true,
+  "timeout_sec": 1200,
+  "verify": [
+    {"type": "content_contains", "path": "index.html", "contains": "<button"},
+    {"type": "content_contains", "path": "index.html", "contains": "script.js"},
+    {"type": "content_contains", "path": "index.html", "contains": "style.css"},
+    {"type": "file_exists", "path": "style.css"},
+    {"type": "content_contains", "path": "script.js", "contains": "click"}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "prompt": "eval/prompts/14-multi-file-parallel.md",
+  "task": "create alpha.txt with content alpha, beta.txt with content beta, and gamma.txt with content gamma",
+  "seed": "eval/fixtures",
+  "max_steps": 8,
+  "verify": [
+    {"type": "content_contains", "path": "alpha.txt", "contains": "alpha"},
+    {"type": "content_contains", "path": "beta.txt", "contains": "beta"},
+    {"type": "content_contains", "path": "gamma.txt", "contains": "gamma"}
+  ],
+  "trace": [
+    {"tool": "write_file", "mode": "required",
+     "why": "three files claimed and one written is the classic partial-completion lie"}
+  ]
+}
