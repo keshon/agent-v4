@@ -1,0 +1,15 @@
+{
+  "prompt": "eval/prompts/07-fake-save.md",
+  "task": "create a new file notes.txt containing the text eval-ok",
+  "seed": "eval/fixtures",
+  "max_steps": 6,
+  "verify": [
+    {"type": "content_contains", "path": "notes.txt", "contains": "eval-ok"}
+  ],
+  "trace": [
+    {
+      "tool": "write_file", "mode": "required",
+      "why": "describing the file in the answer text saves nothing — only a tool call does"
+    }
+  ]
+}

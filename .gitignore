@@ -8,3 +8,4 @@ agent-debug.log
 agent-frontend.log
 agent-backend.log
 plan.md
+eval/results/

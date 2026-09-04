@@ -1,0 +1,20 @@
+{
+  "prompt": "eval/prompts/03-list-not-ls.md",
+  "task": "what files are in the workspace root? just list their names",
+  "seed": "eval/fixtures",
+  "max_steps": 4,
+  "trace": [
+    {
+      "tool": "list_files", "mode": "required",
+      "why": "listing a directory has a dedicated tool; shelling out for it is unportable and unparseable"
+    },
+    {
+      "tool": "run_shell", "mode": "forbidden", "args_regex": "(?i)\"command\" *: *\"(ls|dir|find)( |\")",
+      "why": "shelling out to ls/dir/find instead of list_files — the discipline the system prompt asks for"
+    },
+    {
+      "tool": "write_file", "mode": "forbidden",
+      "why": "a question about the workspace changes nothing"
+    }
+  ]
+}

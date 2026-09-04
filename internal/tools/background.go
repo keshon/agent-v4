@@ -104,3 +104,27 @@ func (p *BackgroundProcesses) stop(id string) error {
 	}
 	return killProcessGroup(proc.cmd)
 }
+
+// StopAll kills every process this set ever started, for a caller that
+// owns the whole set and is tearing it down — the eval harness between
+// runs, mainly. A run that leaves a dev server alive holds its temporary
+// workspace open, so the next run either starts from a directory that
+// won't delete or inherits a server on the same port; both look like
+// model failures and are neither.
+//
+// Best-effort by design: a process that already exited reports an error
+// from the OS, and that is the expected case, not a problem.
+func (p *BackgroundProcesses) StopAll() {
+	p.mu.Lock()
+	procs := make([]*bgProc, 0, len(p.procs))
+	for _, proc := range p.procs {
+		procs = append(procs, proc)
+	}
+	p.mu.Unlock()
+
+	for _, proc := range procs {
+		if proc.cmd.Process != nil {
+			_ = killProcessGroup(proc.cmd)
+		}
+	}
+}

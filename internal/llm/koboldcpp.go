@@ -272,6 +272,39 @@ func (c *KoboldClient) MaxContextLength(ctx context.Context) (int, error) {
 	return out.Value, nil
 }
 
+// ModelName asks the backend which model is actually loaded, which is
+// rarely what the -model flag says: local servers usually ignore it and
+// serve whatever weights they were started with. Worth recording next to
+// any measurement — a pass rate compared against one from a different
+// model, or the same model at a different quantization, is worse than no
+// number at all. Backends that don't expose this return an error and the
+// caller carries on without it.
+func (c *KoboldClient) ModelName(ctx context.Context) (string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/api/v1/model", nil)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+
+	resp, err := c.http.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("call backend: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("backend returned %s", resp.Status)
+	}
+
+	var out struct {
+		Result string `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	return out.Result, nil
+}
+
 // normalizeArguments handles the real shape of this wire format: per spec,
 // function.arguments is a JSON-encoded *string*, e.g. the bytes
 // `"{\"command\": \"ls\"}"` rather than `{"command": "ls"}` directly. Some
