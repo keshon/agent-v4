@@ -140,7 +140,7 @@ func TestParseAndValidate_StructuralRules(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, errs := parseAndValidate(tc.json, map[string]bool{})
+			_, _, errs := parseAndValidate(tc.json, "", map[string]bool{})
 			if len(errs) == 0 {
 				t.Fatalf("expected a validation error containing %q", tc.want)
 			}
@@ -159,7 +159,7 @@ func TestParseAndValidate_StructuralRules(t *testing.T) {
 func TestParseAndValidate_FileExistsOnDirectory_Rejected(t *testing.T) {
 	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"analyze","goal":"g","acceptance":["x"],"files_hint":[],"check":{"type":"file_exists","path":"internal/tools"}}]}`
 	existing := map[string]bool{"internal/tools/registry.go": true, "internal/tools/fs.go": true}
-	_, _, errs := parseAndValidate(plan, existing)
+	_, _, errs := parseAndValidate(plan, "", existing)
 	if len(errs) == 0 || !strings.Contains(strings.Join(errs, ";"), "is a directory") {
 		t.Fatalf("errs = %v, want directory rejection", errs)
 	}
@@ -167,7 +167,7 @@ func TestParseAndValidate_FileExistsOnDirectory_Rejected(t *testing.T) {
 
 func TestParseAndValidate_FileExistsOnPreExistingFile_Rejected(t *testing.T) {
 	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"read the plan","goal":"g","acceptance":["x"],"files_hint":["plan.md"],"check":{"type":"file_exists","path":"plan.md"}}]}`
-	_, _, errs := parseAndValidate(plan, map[string]bool{"plan.md": true})
+	_, _, errs := parseAndValidate(plan, "", map[string]bool{"plan.md": true})
 	if len(errs) == 0 || !strings.Contains(strings.Join(errs, ";"), "verifies nothing") {
 		t.Fatalf("errs = %v, want vacuous-check rejection", errs)
 	}
@@ -179,7 +179,7 @@ func TestParseAndValidate_DuplicateChecks_Rejected(t *testing.T) {
 	plan := `{"subtasks":[
 		{"id":"a","milestone":"m","title":"t1","goal":"g1","acceptance":["x"],"files_hint":["plan.md"],"check":{"type":"file_exists","path":"plan.md"}},
 		{"id":"b","milestone":"m","title":"t2","goal":"g2","acceptance":["y"],"files_hint":["plan.md"],"check":{"type":"file_exists","path":"plan.md"}}]}`
-	_, _, errs := parseAndValidate(plan, map[string]bool{})
+	_, _, errs := parseAndValidate(plan, "", map[string]bool{})
 	if len(errs) == 0 || !strings.Contains(strings.Join(errs, ";"), "same check as s1") {
 		t.Fatalf("errs = %v, want duplicate-check rejection naming s1", errs)
 	}
@@ -189,7 +189,7 @@ func TestParseAndValidate_DistinctChecks_Accepted(t *testing.T) {
 	plan := `{"subtasks":[
 		{"id":"a","milestone":"m","title":"t1","goal":"g1","acceptance":["x"],"files_hint":["index.html"],"check":{"type":"file_exists","path":"index.html"}},
 		{"id":"b","milestone":"m","title":"t2","goal":"g2","acceptance":["y"],"files_hint":["style.css"],"check":{"type":"file_exists","path":"style.css"}}]}`
-	_, _, errs := parseAndValidate(plan, map[string]bool{})
+	_, _, errs := parseAndValidate(plan, "", map[string]bool{})
 	if len(errs) != 0 {
 		t.Fatalf("distinct checks should pass, got: %v", errs)
 	}
@@ -197,7 +197,7 @@ func TestParseAndValidate_DistinctChecks_Accepted(t *testing.T) {
 
 func TestParseAndValidate_FileExistsOnNewFile_Accepted(t *testing.T) {
 	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"t","goal":"g","acceptance":["x"],"files_hint":["style.css"],"check":{"type":"file_exists","path":"style.css"}}]}`
-	_, _, errs := parseAndValidate(plan, map[string]bool{"index.html": true})
+	_, _, errs := parseAndValidate(plan, "", map[string]bool{"index.html": true})
 	if len(errs) != 0 {
 		t.Fatalf("new-file check should be accepted, got: %v", errs)
 	}
@@ -205,7 +205,7 @@ func TestParseAndValidate_FileExistsOnNewFile_Accepted(t *testing.T) {
 
 func TestParseAndValidate_ExistingFileNoWarning(t *testing.T) {
 	plan := `{"subtasks":[{"id":"a","milestone":"m","title":"t","goal":"g","acceptance":["x"],"files_hint":["main.go"],"check":{"type":"shell","cmd":"go build ./..."}}]}`
-	_, warnings, errs := parseAndValidate(plan, map[string]bool{"main.go": true})
+	_, warnings, errs := parseAndValidate(plan, "", map[string]bool{"main.go": true})
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}

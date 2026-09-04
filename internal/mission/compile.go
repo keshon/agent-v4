@@ -104,7 +104,7 @@ func CompileSeed(m *Mission, sub *Subtask, listing string) string {
 		filesLine = strings.Join(files, ", ")
 	}
 
-	return fmt.Sprintf(prompts.MissionSeed,
+	return withSkillHint(m.Task, fmt.Sprintf(prompts.MissionSeed,
 		m.Task,
 		m.RenderLedger(),
 		sub.ID, sub.Title,
@@ -113,7 +113,7 @@ func CompileSeed(m *Mission, sub *Subtask, listing string) string {
 		filesLine,
 		sub.Check.Render(),
 		listing,
-	)
+	))
 }
 
 // CompileFixSeed builds a fix worker's first user message after a check
@@ -135,7 +135,7 @@ func CompileFixSeed(m *Mission, sub *Subtask, checkOutput, listing string) strin
 		checkOutput = "(no output)"
 	}
 
-	return fmt.Sprintf(prompts.MissionFixSeed,
+	return withSkillHint(m.Task, fmt.Sprintf(prompts.MissionFixSeed,
 		m.Task,
 		m.RenderLedger(),
 		sub.ID, sub.Title,
@@ -145,7 +145,14 @@ func CompileFixSeed(m *Mission, sub *Subtask, checkOutput, listing string) strin
 		checkOutput,
 		filesLine,
 		listing,
-	)
+	))
+}
+
+func withSkillHint(task, seed string) string {
+	if h := SkillHint(task); h != "" {
+		return seed + "\n\n" + h
+	}
+	return seed
 }
 
 func unionPaths(a, b []string) []string {

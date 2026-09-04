@@ -66,14 +66,17 @@ type Config struct {
 	// exactly the kind of mistake this catches some of the time.
 	SkipVerify bool
 
-	// VerifyOnZeroWrites, when set alongside SkipVerify, still runs the
-	// self-check round if the run is about to finish with zero successful
-	// MutatingTools calls. Mission workers use this: their correctness is
-	// checked mechanically afterwards (so the general verify round is
-	// redundant), but a worker that announces "let me write the file" and
-	// finishes without writing is best corrected HERE, while its analysis
-	// is still in context — one nudge now beats a fresh fix worker that
-	// has to rediscover everything.
+	// VerifyOnZeroWrites declares that this run is supposed to write
+	// files, which turns a finish with zero successful MutatingTools calls
+	// into a failure rather than an answer: the self-check round still
+	// runs despite SkipVerify, and after that the finish is refused up to
+	// MaxZeroWriteRefusals times. Mission workers set this per subtask —
+	// their correctness is checked mechanically afterwards, so the general
+	// verify round is redundant, but a worker that announces "let me write
+	// the file" and stops is best corrected HERE, while its analysis is
+	// still in context, rather than by a fix worker that has to rediscover
+	// everything. Leave false for runs where writing nothing is a valid
+	// outcome, or the loop will argue with a model that is right.
 	VerifyOnZeroWrites bool
 
 	// OnStep, if set, is called after every model response — for
@@ -274,12 +277,30 @@ type runState struct {
 	lastSignature, verifyFailedOutput, lastSingleTool string
 	mutatedPaths                                      []string
 
+	// zeroWriteFinishes counts how many times the model has tried to end
+	// the run having written nothing, while VerifyOnZeroWrites says the
+	// run was supposed to write. See MaxZeroWriteRefusals.
+	zeroWriteFinishes int
+
+	// pendingBudget holds a context-usage notice that lost its slot to a
+	// more urgent nudge, to be delivered on the next step that has one
+	// free. See interject.
+	pendingBudget string
+
 	// idempotentSeen maps signature (name+args) of successful idempotent
 	// calls to the step that ran them; cleared whenever anything mutates
 	// the workspace. Exact repeats short-circuit to an error result — a
 	// weak model that re-issues the same read five times gets told it's
 	// repeating instead of getting five copies of the same bytes.
 	idempotentSeen map[string]int
+
+	// wrotePaths maps write_file path → step of the successful write.
+	// Live failure (2026-07-14): weak model rewrote package.json with
+	// identical content in a tight loop; soft ToolLoop/StuckRepeating
+	// nudges were ignored, and each "ok" reset stuckSteps because
+	// progressed==true. A second write_file to the same path is refused
+	// so the model must write the next file or finish.
+	wrotePaths map[string]int
 }
 
 func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) {
@@ -393,6 +414,32 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 				}
 				continue
 			}
+			// Announcing the work is not doing the work. A worker that ends
+			// its turn with "Now let me write the plan.md file" and no tool
+			// call has produced nothing, and its own narration is the only
+			// evidence to the contrary. The verify round above catches the
+			// FIRST such finish — but only the first, because verifiedOnce
+			// is a one-shot. Live failure (2026-07-14, parseurl mission):
+			// the worker announced, took the verify nudge, announced again,
+			// and the second announcement was accepted as a finish. All
+			// three subtask attempts died in exactly that shape.
+			//
+			// While writes are still expected and none have landed, refuse
+			// the finish and quote the model's own claim back at it. Bounded
+			// by MaxZeroWriteRefusals: a few cheap in-context retries beat a
+			// fresh fix worker that has to rediscover the whole subtask.
+			if a.cfg.VerifyOnZeroWrites && st.mutatingSucceeded == 0 &&
+				st.zeroWriteFinishes < MaxZeroWriteRefusals {
+				st.zeroWriteFinishes++
+				history = append(history, llm.Message{
+					Role: llm.RoleUser,
+					Content: fmt.Sprintf(prompts.AnnouncedNotWritten,
+						lastClaim(resp.Message.Content),
+						strings.Join(a.cfg.MutatingTools, "/")),
+				})
+				a.saveState(history)
+				continue
+			}
 			if strings.TrimSpace(resp.Message.Content) == "" {
 				if !st.emptyFinishRetried {
 					st.emptyFinishRetried = true
@@ -431,8 +478,25 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		// context with duplicates. The repeat comes back as an *error*
 		// result on purpose: errors don't count as progress, so the stuck
 		// detector keeps escalating if the model won't change course.
+		//
+		// write_file to a path already written this run is refused the same
+		// way: soft nudges don't break rewrite loops when every call
+		// returns success (progressed=true clears stuckSteps).
 		skipped := make([]bool, len(resp.Message.ToolCalls))
 		for i, call := range resp.Message.ToolCalls {
+			if call.Name == "write_file" {
+				if path := writePathFromArgs(call.Arguments); path != "" {
+					if prev, seen := st.wrotePaths[path]; seen {
+						skipped[i] = true
+						results[i] = callResult{err: fmt.Errorf(
+							"already wrote %s in step %d — it is on disk. Do NOT rewrite it with "+
+								"write_file. Use patch_file for edits, or write_file the NEXT missing "+
+								"file from your files_hint / acceptance list, then finish when done",
+							path, prev)}
+						continue
+					}
+				}
+			}
 			if !a.cfg.Tools.IdempotentOf(call.Name) {
 				continue
 			}
@@ -506,6 +570,14 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 							st.mutatedPaths = append(st.mutatedPaths, p)
 						}
 					}
+					if call.Name == "write_file" {
+						if path := writePathFromArgs(call.Arguments); path != "" {
+							if st.wrotePaths == nil {
+								st.wrotePaths = make(map[string]int)
+							}
+							st.wrotePaths[path] = step
+						}
+					}
 				}
 				if call.Name == "delegate_task" {
 					if m := parseDelegateMutations(content); m > 0 {
@@ -527,42 +599,39 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			st.idempotentSeen = nil
 		}
 
-		if st.mutatingSucceeded > mutatingBefore {
+		// A step that changed the workspace is progress by definition, so
+		// it can never be evidence of a loop. Writing four different files
+		// in a row is the normal shape of a scaffolding subtask — it is
+		// write_file four times, which is exactly what the same-tool
+		// counter used to flag. Live failure (2026-07-14, FPS mission):
+		// package.json, vite.config.ts and index.html were written
+		// correctly, tripped the nudge at three, and the worker was told
+		// to "switch to a genuinely different tool" mid-scaffold.
+		// src/main.ts — the third acceptance criterion — was never written.
+		//
+		// Exact repeats are already handled by callSignature/idempotentSeen
+		// and wrotePaths, so what's left for the same-tool counter is the
+		// narrow case that nudge was written for: grinding one read-only
+		// tool with slightly different arguments and never converging.
+		mutated := st.mutatingSucceeded > mutatingBefore
+		if mutated {
 			st.exploratorySteps = 0
+			st.lastSingleTool = ""
+			st.consecutiveSameToolCount = 0
 		} else {
 			st.exploratorySteps++
+			a.trackSingleToolLoop(resp.Message.ToolCalls, &st)
 		}
-		if st.exploratorySteps >= a.cfg.MaxExploratorySteps && !st.searchFatigueWarned {
-			st.searchFatigueWarned = true
-			history = append(history, llm.Message{Role: llm.RoleUser, Content: prompts.SearchFatigue})
-		}
-
-		a.trackSingleToolLoop(resp.Message.ToolCalls, &st)
-		if st.consecutiveSameToolCount >= 3 && !st.toolLoopWarned {
-			st.toolLoopWarned = true
-			history = append(history, llm.Message{Role: llm.RoleUser, Content: prompts.ToolLoop})
-		}
-
-		if budgetNudge != "" {
-			history = append(history, llm.Message{Role: llm.RoleUser, Content: budgetNudge})
-		}
-		a.saveState(history)
-
 		if progressed && !repeat {
 			st.stuckSteps = 0
-			continue
+		} else {
+			st.stuckSteps++
 		}
 
-		st.stuckSteps++
-		if st.stuckSteps >= a.cfg.MaxStuckSteps {
-			nudge := prompts.StuckFailing
-			if repeat {
-				nudge = prompts.StuckRepeating
-			}
-			history = append(history, llm.Message{Role: llm.RoleUser, Content: nudge})
-			st.stuckSteps = 0
-			st.lastSignature = "" // the nudge itself breaks the repeat chain
+		if msg := a.interject(&st, stepOutcome{repeat: repeat, budget: budgetNudge}); msg != "" {
+			history = append(history, llm.Message{Role: llm.RoleUser, Content: msg})
 		}
+		a.saveState(history)
 	}
 
 	a.LastRunMutations = st.mutatingSucceeded
@@ -598,6 +667,16 @@ func mutatedPathsFromCall(args json.RawMessage) []string {
 		}
 	}
 	return out
+}
+
+func writePathFromArgs(args json.RawMessage) string {
+	var fields struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(args, &fields) != nil || fields.Path == "" {
+		return ""
+	}
+	return strings.TrimPrefix(strings.ReplaceAll(fields.Path, "\\", "/"), "./")
 }
 
 // parseDelegateMutations reads the structured DELEGATE header from a
@@ -640,6 +719,95 @@ func (a *Agent) maybeCompact(history *[]llm.Message, usage llm.Usage, st *runSta
 // exactly one tool call and it's the same tool name as the previous
 // such step — catches run_shell/git-log tweak loops that exact-repeat
 // detection misses because the arguments differ slightly each time.
+// maxSameToolSteps is how many consecutive non-mutating steps calling one
+// tool alone trip the tool-loop nudge.
+const maxSameToolSteps = 3
+
+// stepOutcome carries the parts of a completed step that interject can't
+// read off runState.
+type stepOutcome struct {
+	// repeat is true when this step's tool calls were byte-identical to
+	// the previous step's — it picks StuckRepeating over StuckFailing.
+	repeat bool
+
+	// budget is a context-usage notice for this step, or "" for none.
+	budget string
+}
+
+// interject picks at most ONE thing to say to the model at the end of a
+// step that made tool calls.
+//
+// It replaces six independent append sites, all of which could fire in
+// the same step: a worker could receive a search-fatigue nudge, a
+// tool-loop warning, a budget notice and a stuck escalation at once, in
+// source order rather than importance order. A 4B-active model given four
+// corrections simultaneously follows none of them — and some of them
+// contradict each other outright ("broaden your search" against "stop
+// searching and act"). One signal, chosen by severity, is the whole point.
+//
+// The latches keep each advisory to once per run; without them a nudge
+// repeats every step for as long as its counter stays over the line,
+// which is its own kind of noise.
+func (a *Agent) interject(st *runState, o stepOutcome) string {
+	// A budget notice fires once per threshold crossed, so it has to
+	// queue rather than be dropped when something more urgent takes the
+	// slot — otherwise the run never hears about it again.
+	if o.budget != "" {
+		st.pendingBudget = o.budget
+	}
+
+	switch {
+	case st.stuckSteps >= a.cfg.MaxStuckSteps:
+		// Hardest signal: nothing has worked for MaxStuckSteps running.
+		st.stuckSteps = 0
+		st.lastSignature = "" // the nudge itself breaks the repeat chain
+		if o.repeat {
+			return prompts.StuckRepeating
+		}
+		return prompts.StuckFailing
+
+	case st.consecutiveSameToolCount >= maxSameToolSteps && !st.toolLoopWarned:
+		st.toolLoopWarned = true
+		return prompts.ToolLoop
+
+	case st.exploratorySteps >= a.cfg.MaxExploratorySteps && !st.searchFatigueWarned:
+		st.searchFatigueWarned = true
+		return prompts.SearchFatigue
+	}
+
+	msg := st.pendingBudget
+	st.pendingBudget = ""
+	return msg
+}
+
+// MaxZeroWriteRefusals bounds how many times a run that was supposed to
+// write files may try to finish having written none. Each refusal costs
+// one cheap in-context step; past this the subtask goes back to the
+// mission layer, which has the failing check output and can seed a fix
+// worker with real evidence instead of another nudge.
+const MaxZeroWriteRefusals = 3
+
+// lastClaim returns the final non-empty line of a model message, trimmed
+// to something quotable. Quoting the model's own sentence back is the
+// point: a generic "you wrote nothing" nudge reads as boilerplate to a
+// weak model and gets answered with more narration, while its own words
+// are the one piece of context it can't pattern-match past.
+func lastClaim(content string) string {
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		const maxQuote = 200
+		if r := []rune(line); len(r) > maxQuote {
+			line = string(r[:maxQuote]) + "…"
+		}
+		return line
+	}
+	return "(nothing)"
+}
+
 func (a *Agent) trackSingleToolLoop(calls []llm.ToolCall, st *runState) {
 	if len(calls) != 1 {
 		st.lastSingleTool = ""

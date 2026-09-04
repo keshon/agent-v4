@@ -88,9 +88,17 @@ var (
 	// stop and ask, instead of indefinitely narrowing the same dead end.
 	SearchFatigue = read("search_fatigue.txt")
 
-	// ToolLoop fires once when the same tool is called alone for several
-	// consecutive steps with only small argument changes.
+	// ToolLoop fires once when the same read-only tool is called alone for
+	// several consecutive steps with only small argument changes. Steps
+	// that mutate the workspace never count toward it — writing several
+	// different files in a row is progress, not a loop.
 	ToolLoop = read("tool_loop.txt")
+
+	// AnnouncedNotWritten fires when the model tries to end a run that was
+	// supposed to write files having written none — the "let me now write
+	// the file" finish. Two %s: the model's own closing line, and the
+	// names of the mutating tools.
+	AnnouncedNotWritten = read("announced_not_written.txt")
 
 	// CompactNotice is inserted once when history is mechanically
 	// compacted at 90% context usage.

@@ -107,8 +107,26 @@ func TestRunCheck_HTTP(t *testing.T) {
 	}
 }
 
-func TestRunCheck_UnknownType(t *testing.T) {
-	if out, ok := RunCheck(context.Background(), Check{Type: "vibes"}, testWS(t)); ok {
-		t.Fatalf("unknown check type must fail loudly, got: %s", out)
+func TestRunCheck_ContentContains(t *testing.T) {
+	ws := testWS(t)
+	ctx := context.Background()
+	full := filepath.Join(ws.Root(), "game.js")
+
+	if out, ok := RunCheck(ctx, Check{Type: "content_contains", Path: "game.js", Contains: "raycast"}, ws); ok {
+		t.Fatalf("missing file should fail, got: %s", out)
+	}
+
+	if err := os.WriteFile(full, []byte("function draw() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, ok := RunCheck(ctx, Check{Type: "content_contains", Path: "game.js", Contains: "raycast"}, ws); ok {
+		t.Fatalf("wrong content should fail, got: %s", out)
+	}
+	if out, ok := RunCheck(ctx, Check{Type: "content_contains", Path: "game.js", Contains: "draw"}, ws); !ok {
+		t.Fatalf("matching content should pass, got: %s", out)
+	}
+	if out, ok := RunCheck(ctx, Check{Type: "content_contains", Path: "game.js", Contains: "  "}, ws); ok {
+		t.Fatalf("blank needle should fail, got: %s", out)
 	}
 }
+

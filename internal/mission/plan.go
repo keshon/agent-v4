@@ -93,7 +93,7 @@ func generateSubtasks(ctx context.Context, client llm.Client, messages []llm.Mes
 		}
 		lastRaw = resp.Message.Content
 
-		subtasks, warnings, lastErrs = parseAndValidate(lastRaw, req.ExistingFiles)
+		subtasks, warnings, lastErrs = parseAndValidate(lastRaw, req.Task, req.ExistingFiles)
 		if len(lastErrs) == 0 {
 			return subtasks, warnings, nil
 		}
@@ -102,7 +102,8 @@ func generateSubtasks(ctx context.Context, client llm.Client, messages []llm.Mes
 		attempts, strings.Join(lastErrs, "; "), lastRaw)
 }
 
-func parseAndValidate(raw string, existing map[string]bool) (subtasks []Subtask, warnings, errs []string) {
+func parseAndValidate(raw, task string, existing map[string]bool) (subtasks []Subtask, warnings, errs []string) {
+	raw = stripThink(raw)
 	var doc struct {
 		Subtasks []Subtask `json:"subtasks"`
 	}
@@ -144,14 +145,18 @@ func parseAndValidate(raw string, existing map[string]bool) (subtasks []Subtask,
 			errs = append(errs, fmt.Sprintf("%s: no acceptance criteria", s.ID))
 		}
 
+		if msg := readOnlySubtaskErr(s, existing); msg != "" {
+			errs = append(errs, msg)
+		}
+
 		errs = append(errs, validateCheck(s, existing)...)
 
 		if s.Check.Type != "" && s.Check.Type != "none" {
-			fp := s.Check.Type + "|" + s.Check.Cmd + "|" + normalizePlanPath(s.Check.Path) + "|" + s.Check.URL
+			fp := s.Check.fingerprint()
 			if owner, dup := checkOwner[fp]; dup {
 				errs = append(errs, fmt.Sprintf("%s: has the same check as %s — a check must verify its "+
 					"OWN subtask's work. Merge the two subtasks into one, or give this one a check that "+
-					"detects its specific contribution (e.g. a shell grep/findstr for the content it adds)",
+					"detects its specific contribution (e.g. content_contains for a symbol it adds)",
 					s.ID, owner))
 			} else {
 				checkOwner[fp] = s.ID
@@ -167,15 +172,77 @@ func parseAndValidate(raw string, existing map[string]bool) (subtasks []Subtask,
 			}
 		}
 	}
+
+	// One blob for a multi-file task is the reactive loop with ceremony.
+	if msg := planTooCoarse(task, subtasks); msg != "" {
+		errs = append(errs, msg)
+	}
 	return subtasks, warnings, errs
+}
+
+// stripThink drops Qwen-style <think>…</think> wrappers. When the plan
+// grammar is ignored by the backend, thinking models dump thousands of
+// tokens of reasoning before the JSON — Unmarshal then fails or the
+// validator never sees the real plan.
+func stripThink(s string) string {
+	for {
+		start := strings.Index(s, "<think>")
+		if start < 0 {
+			return strings.TrimSpace(s)
+		}
+		rest := s[start+len("<think>"):]
+		end := strings.Index(rest, "</think>")
+		if end < 0 {
+			return strings.TrimSpace(s[:start])
+		}
+		s = s[:start] + rest[end+len("</think>"):]
+	}
+}
+
+// readOnlySubtaskErr rejects "read/understand the plan" units. Workers
+// already have read tools; anything "understood" dies with the worker.
+// Live shape 2026-07-14: s1 read PLAN.md with check none → retry "fixed"
+// it to file_exists on the already-existing file → still rejected.
+func readOnlySubtaskErr(s *Subtask, existing map[string]bool) string {
+	if !allHintsExist(s.FilesHint, existing) {
+		return ""
+	}
+	if len(s.FilesHint) == 0 {
+		return ""
+	}
+	low := strings.ToLower(s.Title + " " + s.Goal)
+	readish := strings.Contains(low, "read ") || strings.Contains(low, "understand") ||
+		strings.Contains(low, "analyz") || strings.Contains(low, "review") ||
+		strings.Contains(low, "inspect") || strings.Contains(low, "study ") ||
+		strings.Contains(low, "look at")
+	noneOrVacuous := s.Check.Type == "" || s.Check.Type == "none" ||
+		(s.Check.Type == "file_exists" && existing[normalizePlanPath(s.Check.Path)])
+	if readish || noneOrVacuous {
+		return fmt.Sprintf("%s: read-only subtask — REMOVE it. Workers read existing files themselves; "+
+			"only plan subtasks that CREATE or MODIFY files. Put any \"read the plan\" work into the "+
+			"first implementation subtask's goal", s.ID)
+	}
+	return ""
+}
+
+func allHintsExist(hints []string, existing map[string]bool) bool {
+	if len(hints) == 0 {
+		return false
+	}
+	for _, p := range hints {
+		if !existing[normalizePlanPath(p)] {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCheck(s *Subtask, existing map[string]bool) (errs []string) {
 	c := s.Check
 	switch c.Type {
 	case "none":
-		if len(s.FilesHint) > 0 {
-			errs = append(errs, fmt.Sprintf("%s: touches files (%s) but has no check — pick file_exists or shell",
+		if len(s.FilesHint) > 0 && !allHintsExist(s.FilesHint, existing) {
+			errs = append(errs, fmt.Sprintf("%s: touches files (%s) but has no check — pick file_exists, content_contains, or shell",
 				s.ID, strings.Join(s.FilesHint, ", ")))
 		}
 	case "file_exists":
@@ -189,14 +256,28 @@ func validateCheck(s *Subtask, existing map[string]bool) (errs []string) {
 			// nothing. A check that is already true before any work
 			// verifies nothing.
 			errs = append(errs, fmt.Sprintf("%s: file_exists check on %q verifies nothing — the file "+
-				"already exists. Point it at a file this subtask CREATES, or use a shell check that "+
-				"proves the change (a build/test command, or grep/findstr for the new content)", s.ID, c.Path))
+				"already exists. Point it at a file this subtask CREATES, use content_contains for a "+
+				"symbol you add, or use a shell check that proves the change", s.ID, c.Path))
 		case isDirOf(existing, path):
 			// Live failure shape: a plan checked file_exists on
 			// internal/tools (a directory) — unsatisfiable, and the fix
 			// loop burned three workers trying to satisfy it.
 			errs = append(errs, fmt.Sprintf("%s: file_exists check path %q is a directory — "+
 				"the check can never pass. Name a specific file", s.ID, c.Path))
+		}
+	case "content_contains":
+		path := normalizePlanPath(c.Path)
+		needle := strings.TrimSpace(strings.Trim(c.Contains, `"'`))
+		s.Check.Contains = needle // normalize planner-escaped quotes like "\"vite\""
+		switch {
+		case strings.TrimSpace(path) == "":
+			errs = append(errs, fmt.Sprintf("%s: content_contains check has no path", s.ID))
+		case isDirOf(existing, path):
+			errs = append(errs, fmt.Sprintf("%s: content_contains path %q is a directory — name a file", s.ID, c.Path))
+		case needle == "":
+			errs = append(errs, fmt.Sprintf("%s: content_contains check has empty contains", s.ID))
+		case len(needle) < 3:
+			errs = append(errs, fmt.Sprintf("%s: content_contains %q is too short — use a distinctive symbol (function name, export, tag)", s.ID, c.Contains))
 		}
 	case "shell":
 		cmd := strings.TrimSpace(strings.ToLower(c.Cmd))
@@ -213,6 +294,21 @@ func validateCheck(s *Subtask, existing map[string]bool) (errs []string) {
 		errs = append(errs, fmt.Sprintf("%s: unknown check type %q", s.ID, c.Type))
 	}
 	return errs
+}
+
+// planTooCoarse rejects "one subtask does everything" when the task
+// already names multiple deliverable files — that shape is the reactive
+// loop with extra steps, not a real decomposition.
+func planTooCoarse(task string, subtasks []Subtask) string {
+	if len(subtasks) != 1 {
+		return ""
+	}
+	files := FileMentions(task)
+	if len(files) < 2 {
+		return ""
+	}
+	return fmt.Sprintf("task names %d files (%s) but plan has only 1 subtask — split into one subtask per file/module (merge only tightly-coupled edits to the SAME file)",
+		len(files), strings.Join(files, ", "))
 }
 
 // normalizePlanPath makes a model-written path comparable against the

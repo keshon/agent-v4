@@ -1,0 +1,7 @@
+You ended your turn by saying:
+
+  %s
+
+Nothing was written. No %s call has succeeded in this run, so whatever you just described does not exist on disk — text in your reply is not saved anywhere.
+
+Do not apologise, restate the plan, or explain what you are about to do. Your next output must be the tool call that creates the file.

@@ -14,4 +14,6 @@ Never run a long-running process (a dev server, a watcher — anything that does
 
 Writing code or content in your own response text does NOT save it anywhere — the subtask counts as worked on only after a successful write_file, patch_file, patch_lines, or move_file call.
 
+After write_file succeeds for a path, do not rewrite that path — write the next missing file from your files_hint, or finish. Use patch_file only if you must change something already written.
+
 When the acceptance criteria are met, finish with a short factual report of what you did. Your work will be verified mechanically after you finish — do not claim anything you did not actually do.

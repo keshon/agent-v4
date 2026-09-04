@@ -47,13 +47,21 @@ func main() {
 	missionMode := flag.Bool("mission", false, "run the task as a mission: an upfront model-generated "+
 		"plan (approved by you), then one fresh-context worker per subtask, each verified mechanically. "+
 		"For complex multi-file tasks a weak model can't hold in its head; simple tasks are better off "+
-		"without it")
+		"without it. Also auto-enabled when the task names ≥2 deliverable files (see -direct)")
+	direct := flag.Bool("direct", false, "force the reactive agent loop even when the task looks multi-file")
 	yes := flag.Bool("yes", false, "skip the mission plan approval gate and run the plan as generated")
 	flag.Parse()
 
 	task := strings.Join(flag.Args(), " ")
 	if task == "" && *resume == "" {
 		log.Fatal(`usage: agent [flags] "task description"  (or  agent -resume <state.json> [-answer "..."])`)
+	}
+
+	// Auto-mission for multi-file tasks — the cheap alternative to hoping
+	// the reactive loop (or spontaneous delegate_task) holds a plan.
+	if !*missionMode && !*direct && task != "" && mission.SuggestMission(task) {
+		*missionMode = true
+		fmt.Println("auto-mission: task names multiple deliverable files (use -direct to skip)")
 	}
 
 	// A -resume target whose directory holds mission.json is a mission

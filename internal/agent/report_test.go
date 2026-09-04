@@ -93,8 +93,8 @@ func TestAgent_Report_PopulatedEvenWhenMaxStepsExceeded(t *testing.T) {
 		t.Fatalf("MutatedPaths = %v, want [half-done.txt] — a run that hit "+
 			"MaxSteps still wrote files, and the harness must know", r.MutatedPaths)
 	}
-	if a.LastRunMutations != 2 {
-		t.Fatalf("LastRunMutations = %d, want 2 (one successful write per step)", a.LastRunMutations)
+	if a.LastRunMutations != 1 {
+		t.Fatalf("LastRunMutations = %d, want 1 (second write_file to same path is refused)", a.LastRunMutations)
 	}
 	if r.Final != "" {
 		t.Fatalf("Final = %q, want empty for an unfinished run", r.Final)

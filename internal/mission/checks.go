@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"agent-v4/internal/workspace"
@@ -46,6 +47,32 @@ func RunCheck(ctx context.Context, c Check, ws *workspace.Workspace) (output str
 			return fmt.Sprintf("file %s exists but is empty (0 bytes)", c.Path), false
 		}
 		return fmt.Sprintf("file %s exists (%d bytes)", c.Path, info.Size()), true
+
+	case "content_contains":
+		// Stronger than file_exists: proves a distinctive symbol from the
+		// acceptance criteria actually landed. Caps the read so a huge
+		// file can't blow a fix-worker prompt.
+		needle := strings.TrimSpace(strings.Trim(c.Contains, `"'`))
+		if needle == "" {
+			return "content_contains check has empty contains", false
+		}
+		full, err := ws.Resolve(c.Path)
+		if err != nil {
+			return fmt.Sprintf("check path rejected: %v", err), false
+		}
+		const maxRead = 256 * 1024
+		data, err := os.ReadFile(full)
+		if err != nil {
+			return fmt.Sprintf("cannot read %s: %v", c.Path, err), false
+		}
+		body := data
+		if len(body) > maxRead {
+			body = body[:maxRead]
+		}
+		if !strings.Contains(string(body), needle) {
+			return fmt.Sprintf("file %s (%d bytes) does not contain %q", c.Path, len(data), needle), false
+		}
+		return fmt.Sprintf("file %s contains %q", c.Path, needle), true
 
 	case "shell":
 		out, err := RunShellCommand(ctx, c.Cmd, ws.Root())

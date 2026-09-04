@@ -43,13 +43,14 @@ const (
 // the harness, after the worker finishes. It's an enum of shapes rather
 // than a free-form shell string on purpose: narrowing what the planner
 // can ask for is the same decision-narrowing lever the plan grammar
-// applies to everything else. file_exists and http run natively in Go;
-// shell reuses the same OS-aware exec as -verify-cmd.
+// applies to everything else. file_exists / content_contains / http run
+// natively in Go; shell reuses the same OS-aware exec as -verify-cmd.
 type Check struct {
-	Type string `json:"type"`           // "shell" | "file_exists" | "http" | "none"
-	Cmd  string `json:"cmd,omitempty"`  // shell: the command line
-	Path string `json:"path,omitempty"` // file_exists: workspace-relative path
-	URL  string `json:"url,omitempty"`  // http: expect a 200 response
+	Type     string `json:"type"`                // "shell" | "file_exists" | "content_contains" | "http" | "none"
+	Cmd      string `json:"cmd,omitempty"`       // shell: the command line
+	Path     string `json:"path,omitempty"`      // file_exists / content_contains
+	Contains string `json:"contains,omitempty"`  // content_contains: substring that must appear
+	URL      string `json:"url,omitempty"`       // http: expect a 200 response
 }
 
 // Render describes the check in plain language for prompts and reports.
@@ -59,11 +60,19 @@ func (c Check) Render() string {
 		return fmt.Sprintf("shell command must succeed: %s", c.Cmd)
 	case "file_exists":
 		return fmt.Sprintf("file must exist: %s", c.Path)
+	case "content_contains":
+		return fmt.Sprintf("file %s must contain %q", c.Path, c.Contains)
 	case "http":
 		return fmt.Sprintf("GET %s must return 200", c.URL)
 	default:
 		return "none"
 	}
+}
+
+// fingerprint uniquely identifies a check so two subtasks can't pass on
+// the same evidence.
+func (c Check) fingerprint() string {
+	return c.Type + "|" + c.Cmd + "|" + normalizePlanPath(c.Path) + "|" + c.Contains + "|" + c.URL
 }
 
 // Subtask is one unit of plan. The model authors the top fields once,
@@ -231,4 +240,18 @@ func (m *Mission) RenderReport() string {
 // AddFact appends a measured fact to a subtask's record.
 func (s *Subtask) AddFact(format string, args ...any) {
 	s.Facts = append(s.Facts, fmt.Sprintf(format, args...))
+}
+
+// ExpectsWrites reports whether finishing this subtask with zero file
+// writes is a failure rather than a legitimate outcome. Everything the
+// planner is allowed to emit implies a write except the one case it's
+// explicitly told to reserve for work that changes no files: check
+// "none" with no files_hint. The distinction matters because the worker
+// loop refuses a zero-write finish — on a subtask that was never meant
+// to write, that refusal would be arguing with a model that is right.
+func (s *Subtask) ExpectsWrites() bool {
+	if len(s.FilesHint) > 0 {
+		return true
+	}
+	return s.Check.Type != "" && s.Check.Type != "none"
 }

@@ -17,6 +17,10 @@ package mission
 //     backend behavior, not Go-testable — confirm the first live run
 //     with -debug before trusting it, and fall back to '*' plus Go-side
 //     length/count validation if the backend rejects the grammar.
+//   - Rule names must be [a-zA-Z0-9]+ with NO underscores. koboldcpp's
+//     GBNF parser treats "_" as ending a name (`path_contains` → `path`
+//     then orphan `_contains`), then Ignored invalid grammar sampler —
+//     live failure 2026-07-14 left planning unconstrained.
 //   - String contents follow llama.cpp's own json.gbnf character class,
 //     so any JSON string the grammar admits is decodable by encoding/json.
 //   - Key order inside objects is FIXED. A weak model given key freedom
@@ -32,9 +36,11 @@ package mission
 // array unrepresentable is cheaper than explaining it.
 const PlanGrammar = `root ::= "{" ws "\"subtasks\"" ws ":" ws "[" ws subtask (ws "," ws subtask){0,7} ws "]" ws "}"
 subtask ::= "{" ws "\"id\"" ws ":" ws str "," ws "\"milestone\"" ws ":" ws str "," ws "\"title\"" ws ":" ws str "," ws "\"goal\"" ws ":" ws str "," ws "\"acceptance\"" ws ":" ws accarr "," ws "\"files_hint\"" ws ":" ws strarr "," ws "\"check\"" ws ":" ws check ws "}"
-check ::= "{" ws "\"type\"" ws ":" ws checktype (ws "," ws checkarg)? ws "}"
-checktype ::= "\"shell\"" | "\"file_exists\"" | "\"http\"" | "\"none\""
-checkarg ::= ("\"cmd\"" | "\"path\"" | "\"url\"") ws ":" ws str
+check ::= "{" ws "\"type\"" ws ":" ws checktype (ws "," ws checkfields)? ws "}"
+checktype ::= "\"shell\"" | "\"file_exists\"" | "\"content_contains\"" | "\"http\"" | "\"none\""
+checkfields ::= pathcont | onearg
+pathcont ::= "\"path\"" ws ":" ws str ws "," ws "\"contains\"" ws ":" ws str
+onearg ::= ("\"cmd\"" | "\"path\"" | "\"url\"") ws ":" ws str
 accarr ::= "[" ws str (ws "," ws str){0,4} ws "]"
 strarr ::= "[" ws (str (ws "," ws str){0,4})? ws "]"
 str ::= "\"" schar{1,300} "\""

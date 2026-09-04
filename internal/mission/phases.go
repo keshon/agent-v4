@@ -297,6 +297,9 @@ func (r *Runner) runPlan(ctx context.Context, m *Mission) error {
 	if m.Map != "" {
 		listing = m.Map
 	}
+	if brief := SpecBrief(r.WS, m.Task, existing); brief != "" {
+		listing = listing + "\n\n## Spec files (verbatim — plan FROM these, do not invent a different stack)\n" + brief
+	}
 	editNote := ""
 
 	for revision := 0; ; revision++ {
@@ -479,6 +482,9 @@ func (r *Runner) tryReplan(ctx context.Context, m *Mission, reason string) error
 	r.event("replanning (%d/%d)", m.Replans+1, r.maxReplans())
 
 	listing, existing := WorkspaceListing(r.WS)
+	if brief := SpecBrief(r.WS, m.Task, existing); brief != "" {
+		listing = listing + "\n\n## Spec files (verbatim — plan FROM these, do not invent a different stack)\n" + brief
+	}
 	editNote := ""
 	for revision := 0; ; revision++ {
 		newSubs, warnings, err := GenerateReplan(ctx, r.Client, ReplanRequest{
@@ -553,11 +559,13 @@ func (r *Runner) newWorker(sub *Subtask) *agent.Agent {
 		ContextLimit: r.ContextLimit,
 		// The mission's checks are mechanical, so the general self-check
 		// round is a redundant extra call per subtask — EXCEPT when the
-		// worker is about to finish having written nothing: that's the
-		// announce-without-write shape, and one in-context zero-writes
-		// nudge is far cheaper than the fresh fix worker it prevents.
+		// worker is about to finish having written nothing on a subtask
+		// that was supposed to write: that's the announce-without-write
+		// shape, and a few in-context refusals are far cheaper than the
+		// fresh fix worker they prevent. A subtask that legitimately
+		// changes no files must not be argued with, hence ExpectsWrites.
 		SkipVerify:         true,
-		VerifyOnZeroWrites: true,
+		VerifyOnZeroWrites: sub.ExpectsWrites(),
 		StateFile:          r.workerStateFile(sub),
 		OnStep:             onStep,
 	})

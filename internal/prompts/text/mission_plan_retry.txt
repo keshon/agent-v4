@@ -2,4 +2,4 @@ Your plan was rejected by mechanical validation for these reasons:
 
 %s
 
-Produce a corrected JSON plan in the same format. Fix every listed problem; change nothing that wasn't flagged.
+Produce a corrected JSON plan in the same format. Fix every listed problem — you MAY remove bad subtasks or merge them. Change nothing that wasn't flagged.

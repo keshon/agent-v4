@@ -127,3 +127,54 @@ func (c countingConcurrentStub) Run(context.Context, json.RawMessage) (string, e
 	atomic.AddInt32(c.runs, 1)
 	return "status 200", nil
 }
+
+// Live failure (2026-07-14): write_file package.json succeeded, then was
+// reissued identically for many steps. Soft nudges failed because each
+// "ok" counted as progress. A second write_file to the same path must
+// short-circuit as an error and must not re-execute.
+func TestAgent_WriteFile_SamePathRefused(t *testing.T) {
+	var runs int32
+	writeArgs := json.RawMessage(`{"path":"package.json","content":"{\"name\":\"x\"}"}`)
+	otherArgs := json.RawMessage(`{"path":"tsconfig.json","content":"{}"}`)
+	client := &stubClient{responses: []llm.ChatResponse{
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "1", Name: "write_file", Arguments: writeArgs}}}},
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "2", Name: "write_file", Arguments: writeArgs}}}}, // same path — refuse
+		{Message: llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "3", Name: "write_file", Arguments: otherArgs}}}}, // new path — allow
+		{Message: llm.Message{Role: llm.RoleAssistant, Content: "done"}},
+	}}
+	a := New(Config{
+		Client:     client,
+		Tools:      NewRegistry(countingWriteStub{runs: &runs}),
+		System:     "sys",
+		SkipVerify: true,
+	})
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := atomic.LoadInt32(&runs); got != 2 {
+		t.Fatalf("write_file ran %d times, want 2 (first package.json + tsconfig.json)", got)
+	}
+	var refuse string
+	for _, m := range client.lastHistory {
+		if m.Role == llm.RoleTool && m.ToolCallID == "2" {
+			refuse = m.Content
+		}
+	}
+	if !strings.Contains(refuse, "error:") || !strings.Contains(refuse, "already wrote package.json") {
+		t.Fatalf("refuse result = %q, want already-wrote error", refuse)
+	}
+}
+
+type countingWriteStub struct{ runs *int32 }
+
+func (countingWriteStub) Name() string            { return "write_file" }
+func (countingWriteStub) Description() string     { return "stub" }
+func (countingWriteStub) Mode() ToolMode          { return Exclusive }
+func (countingWriteStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
+func (c countingWriteStub) Run(context.Context, json.RawMessage) (string, error) {
+	atomic.AddInt32(c.runs, 1)
+	return "wrote ok", nil
+}

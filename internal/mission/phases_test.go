@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"agent-v4/internal/agent"
 	"agent-v4/internal/llm"
 	"agent-v4/internal/tools"
 )
@@ -39,6 +40,33 @@ func toolCall(name string, args map[string]string) llm.ChatResponse {
 		{ID: "c1", Name: name, Arguments: raw},
 	}}}
 }
+
+// zeroWriteWorkerCalls is how many model calls a worker that never writes
+// consumes on a subtask that was supposed to write: its claim, the
+// zero-writes verify round, and one answer per refusal before the loop
+// stops arguing and hands the subtask back with nothing on disk.
+const zeroWriteWorkerCalls = 2 + agent.MaxZeroWriteRefusals
+
+// zeroWriteWorker scripts that whole exchange. Written in terms of the
+// constant so tuning the refusal budget doesn't silently break every
+// test here into an "unexpected model call" failure.
+func zeroWriteWorker(claim string) []llm.ChatResponse {
+	out := []llm.ChatResponse{text(claim)}
+	for len(out) < zeroWriteWorkerCalls {
+		out = append(out, text("checked my work, all good"))
+	}
+	return out
+}
+
+func script(groups ...[]llm.ChatResponse) []llm.ChatResponse {
+	var out []llm.ChatResponse
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+func one(rs ...llm.ChatResponse) []llm.ChatResponse { return rs }
 
 func newRunner(t *testing.T, client llm.Client) (*Runner, string) {
 	t.Helper()
@@ -110,11 +138,12 @@ func TestRunner_FullMission_PlanExecuteVerifyDone(t *testing.T) {
 }
 
 func TestRunner_CheckFailure_FailsLoudlyWithFacts(t *testing.T) {
-	client := &runnerClient{responses: []llm.ChatResponse{
-		text(validPlanJSON),
-		text("I have created index.html and it works great!"), // classic fake-save: no tool calls
-		text("checked my work, all good"),                     // zero-writes verify round; still no writes
-	}}
+	client := &runnerClient{responses: script(
+		one(text(validPlanJSON)),
+		// classic fake-save: claims the file exists, never calls a tool,
+		// and keeps claiming it through every refusal
+		zeroWriteWorker("I have created index.html and it works great!"),
+	)}
 	r, _ := newRunner(t, client)
 	r.MaxFixAttempts = -1 // isolate the check-failure path from the fix loop
 	r.MaxReplans = -1
@@ -160,10 +189,12 @@ func TestRunner_ApprovalGate_RejectAborts(t *testing.T) {
 func TestRunner_ApprovalGate_EditNoteTriggersOneRevision(t *testing.T) {
 	noWritePlan := `{"subtasks":[{"id":"s1","milestone":"m","title":"just say hi","goal":"Reply with a greeting.","acceptance":["a greeting was produced"],"files_hint":[],"check":{"type":"none"}}]}`
 	client := &runnerClient{responses: []llm.ChatResponse{
-		text(validPlanJSON),      // first plan
-		text(noWritePlan),        // revised plan after the note
-		text("hi there"),         // the (trivial) worker
-		text("greeting produced"), // its zero-writes verify round
+		text(validPlanJSON), // first plan
+		text(noWritePlan),   // revised plan after the note
+		// The revised subtask has check "none" and no files_hint, so it
+		// is not expected to write and its finish is taken at face value:
+		// no verify round, no refusals.
+		text("hi there"),
 	}}
 	r, _ := newRunner(t, client)
 
@@ -199,13 +230,14 @@ func TestRunner_ApprovalGate_EditNoteTriggersOneRevision(t *testing.T) {
 }
 
 func TestRunner_FixLoop_ConvergesOnSecondAttempt(t *testing.T) {
-	client := &runnerClient{responses: []llm.ChatResponse{
-		text(validPlanJSON),
-		text("I created index.html and it works!"), // attempt 1: fake-save, check will fail
-		text("double-checked, looks complete"),     // attempt 1's zero-writes verify round — still lying
-		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
-		text("wrote index.html for real this time"), // fix worker finishes
-	}}
+	client := &runnerClient{responses: script(
+		one(text(validPlanJSON)),
+		zeroWriteWorker("I created index.html and it works!"), // attempt 1: fake-save, check will fail
+		one(
+			toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
+			text("wrote index.html for real this time"), // fix worker finishes
+		),
+	)}
 	r, _ := newRunner(t, client)
 
 	m := &Mission{ID: "f1", Task: "make a hello page", Phase: PhasePlan}
@@ -229,8 +261,9 @@ func TestRunner_FixLoop_ConvergesOnSecondAttempt(t *testing.T) {
 		}
 	}
 	// The fix worker's seed must carry the evidence, not a paraphrase.
-	// (requests: 0 plan, 1 worker, 2 zero-writes verify, 3 fix worker)
-	fixSeed := client.requests[3].Messages[1].Content
+	// (requests: 0 plan, then the zero-write worker's exchange, then the
+	// fix worker)
+	fixSeed := client.requests[1+zeroWriteWorkerCalls].Messages[1].Content
 	if !strings.Contains(fixSeed, "FAILED its mechanical check") {
 		t.Fatalf("fix seed missing failure framing:\n%s", fixSeed)
 	}
@@ -244,14 +277,14 @@ func TestRunner_FixLoop_ConvergesOnSecondAttempt(t *testing.T) {
 
 func TestRunner_Replan_AfterFixExhaustion(t *testing.T) {
 	noFilePlan := `{"subtasks":[{"id":"x","milestone":"wrap","title":"summarize","goal":"State that the work is complete.","acceptance":["a summary was produced"],"files_hint":[],"check":{"type":"none"}}]}`
-	client := &runnerClient{responses: []llm.ChatResponse{
-		text(validPlanJSON),
-		text("done (not really)"),  // s1 worker, no writes → check fails
-		text("yes, really done"),   // s1's zero-writes verify round
-		text(noFilePlan),           // replan for the remaining work
-		text("all wrapped up"),     // s2 worker
-		text("nothing left to do"), // s2's zero-writes verify round (its check is none)
-	}}
+	client := &runnerClient{responses: script(
+		one(text(validPlanJSON)),
+		zeroWriteWorker("done (not really)"), // s1 writes nothing → check fails
+		one(
+			text(noFilePlan),       // replan for the remaining work
+			text("all wrapped up"), // s2 worker; its check is none, so no verify round
+		),
+	)}
 	r, _ := newRunner(t, client)
 	r.MaxFixAttempts = -1 // isolate the replan path from the fix loop
 
@@ -276,8 +309,8 @@ func TestRunner_Replan_AfterFixExhaustion(t *testing.T) {
 		t.Fatalf("Phase = %s, want done", m.Phase)
 	}
 	// The replan call saw the execution record and the failure reason.
-	// (requests: 0 plan, 1 s1 worker, 2 s1 verify, 3 replan)
-	replanMsg := client.requests[3].Messages[1].Content
+	// (requests: 0 plan, then s1's zero-write exchange, then the replan)
+	replanMsg := client.requests[1+zeroWriteWorkerCalls].Messages[1].Content
 	if !strings.Contains(replanMsg, "check: FAILED") {
 		t.Fatalf("replan message missing execution record:\n%s", replanMsg)
 	}
@@ -287,11 +320,10 @@ func TestRunner_Replan_AfterFixExhaustion(t *testing.T) {
 }
 
 func TestRunner_Replan_BudgetExhaustedFailsLoudly(t *testing.T) {
-	client := &runnerClient{responses: []llm.ChatResponse{
-		text(validPlanJSON),
-		text("done (not really)"), // no writes → check fails
-		text("confirmed done"),    // zero-writes verify round
-	}}
+	client := &runnerClient{responses: script(
+		one(text(validPlanJSON)),
+		zeroWriteWorker("done (not really)"), // no writes → check fails
+	)}
 	r, _ := newRunner(t, client)
 	r.MaxFixAttempts = -1
 	r.MaxReplans = -1 // no replans allowed
@@ -443,7 +475,7 @@ func TestRunner_Review_OKVerdictRecordsNote(t *testing.T) {
 		text(validPlanJSON),
 		toolCall("write_file", map[string]string{"path": "index.html", "content": "<html>hi</html>"}),
 		text("created"),
-		text("OK"), // review worker
+		text("OK"),                          // review worker
 		text(`{"verdict":"ok","notes":""}`), // verdict call
 	}}
 	r, _ := newRunner(t, client)

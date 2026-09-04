@@ -186,7 +186,7 @@ func (t WriteFile) Run(_ context.Context, args json.RawMessage) (string, error) 
 	if err := os.WriteFile(full, []byte(in.Content), 0o644); err != nil {
 		return "", err
 	}
-	return "ok", nil
+	return fmt.Sprintf("wrote %s (%d bytes)", in.Path, len(in.Content)), nil
 }
 
 type ListFiles struct{ WS *workspace.Workspace }
