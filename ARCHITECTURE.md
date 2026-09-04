@@ -1,4 +1,4 @@
-# agent-v4 architecture
+# tars architecture
 
 One loop, five packages. No "policy" layer, no "orchestrate" layer sitting
 next to the agent doing the same job twice.

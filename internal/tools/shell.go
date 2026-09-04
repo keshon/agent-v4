@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"time"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/workspace"
 )
 
 type RunShell struct {

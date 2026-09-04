@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 func TestGrepFiles_FindsMatchesAcrossFiles(t *testing.T) {

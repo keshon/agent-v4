@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"agent-v4/internal/llm"
+	"tars/internal/llm"
 )
 
 // readStub is an idempotent (pure-read) tool that counts executions.

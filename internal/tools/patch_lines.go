@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/workspace"
 )
 
 // PatchLines replaces lines [start_line, end_line] (1-indexed, inclusive)

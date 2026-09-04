@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"agent-v4/internal/llm"
-	"agent-v4/internal/prompts"
+	"tars/internal/llm"
+	"tars/internal/prompts"
 )
 
 // Config wires together everything an Agent needs. There is exactly one

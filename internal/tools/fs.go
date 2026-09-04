@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/workspace"
 )
 
 const readMaxBytes = 128 * 1024 // cap one read_file result — mirrors grep_files safety nets

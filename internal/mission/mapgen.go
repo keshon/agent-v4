@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 // Map generation is mechanical on purpose: a walk over the workspace

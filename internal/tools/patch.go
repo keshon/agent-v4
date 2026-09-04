@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/workspace"
 )
 
 // PatchFile replaces one exact occurrence of old_content with new_content

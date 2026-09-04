@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/workspace"
 )
 
 // MoveFile renames or moves a file in one atomic step. It exists

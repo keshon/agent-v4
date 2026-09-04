@@ -1,3 +1,3 @@
-module agent-v4
+module tars
 
 go 1.22.2

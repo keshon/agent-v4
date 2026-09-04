@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-v4/internal/llm"
+	"tars/internal/llm"
 )
 
 func say(text string) llm.ChatResponse {

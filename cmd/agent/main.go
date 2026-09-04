@@ -17,12 +17,12 @@ import (
 	"strings"
 	"time"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/llm"
-	"agent-v4/internal/mission"
-	"agent-v4/internal/prompts"
-	"agent-v4/internal/tools"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/llm"
+	"tars/internal/mission"
+	"tars/internal/prompts"
+	"tars/internal/tools"
+	"tars/internal/workspace"
 )
 
 func main() {

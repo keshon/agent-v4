@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 func TestBackgroundProcesses_StartCheckStop(t *testing.T) {

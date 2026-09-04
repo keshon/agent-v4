@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"agent-v4/internal/llm"
+	"tars/internal/llm"
 )
 
 // mutStub stands in for any of the project's mutating file tools — the

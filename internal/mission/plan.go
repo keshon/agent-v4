@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"agent-v4/internal/llm"
-	"agent-v4/internal/prompts"
+	"tars/internal/llm"
+	"tars/internal/prompts"
 )
 
 // planTemperature is deliberately low: structured output wants stability,

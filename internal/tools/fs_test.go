@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 func TestReadFile_TruncatesLargeFiles(t *testing.T) {

@@ -10,11 +10,11 @@ import (
 	"sort"
 	"strings"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/llm"
-	"agent-v4/internal/prompts"
-	"agent-v4/internal/tools"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/llm"
+	"tars/internal/prompts"
+	"tars/internal/tools"
+	"tars/internal/workspace"
 )
 
 // Runner drives a mission through its phases deterministically. The

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"agent-v4/internal/llm"
-	"agent-v4/internal/prompts"
+	"tars/internal/llm"
+	"tars/internal/prompts"
 )
 
 // Live failure shape (Qwen3.6 run, 2026-07-11): the backend cut generation

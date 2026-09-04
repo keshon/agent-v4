@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"sort"
 
-	"agent-v4/internal/llm"
+	"tars/internal/llm"
 )
 
 // ToolMode tells the loop whether a tool is safe to run concurrently with

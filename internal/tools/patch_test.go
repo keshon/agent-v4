@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 func TestPatchFile_ReplacesUniqueOccurrence(t *testing.T) {

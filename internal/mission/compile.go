@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"agent-v4/internal/prompts"
-	"agent-v4/internal/workspace"
+	"tars/internal/prompts"
+	"tars/internal/workspace"
 )
 
 // Context budget knobs. Sizes are characters (≈ tokens*4); the whole

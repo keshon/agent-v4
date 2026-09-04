@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 func testWS(t *testing.T) *workspace.Workspace {

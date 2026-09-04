@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/llm"
-	"agent-v4/internal/tools"
+	"tars/internal/agent"
+	"tars/internal/llm"
+	"tars/internal/tools"
 )
 
 // runnerClient scripts full ChatResponses (tool calls included) for

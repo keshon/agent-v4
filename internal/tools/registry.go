@@ -1,8 +1,8 @@
 package tools
 
 import (
-	"agent-v4/internal/agent"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/workspace"
 )
 
 // Base returns the standard tool set shared by the main agent and

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/workspace"
+	"tars/internal/agent"
+	"tars/internal/workspace"
 )
 
 // StartBackground launches a long-running command (dev server, watcher)

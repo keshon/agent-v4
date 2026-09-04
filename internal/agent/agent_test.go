@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"agent-v4/internal/llm"
-	"agent-v4/internal/prompts"
+	"tars/internal/llm"
+	"tars/internal/prompts"
 )
 
 // stubClient returns canned responses in sequence, one per Chat call.

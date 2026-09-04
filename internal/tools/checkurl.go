@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"agent-v4/internal/agent"
+	"tars/internal/agent"
 )
 
 const checkURLBodyMax = 512

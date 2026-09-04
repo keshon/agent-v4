@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"agent-v4/internal/llm"
+	"tars/internal/llm"
 )
 
 // errStub always fails, so every step it appears in is unproductive.

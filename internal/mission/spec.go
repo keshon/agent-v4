@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 // SpecBrief inlines short text specs (PLAN.md etc.) into the planning

@@ -1,8 +1,8 @@
 package agent
 
 import (
-	"agent-v4/internal/llm"
-	"agent-v4/internal/prompts"
+	"tars/internal/llm"
+	"tars/internal/prompts"
 )
 
 // compactHistory drops older assistant-led step groups from history while

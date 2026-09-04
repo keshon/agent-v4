@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"agent-v4/internal/agent"
+	"tars/internal/agent"
 )
 
 // Delegate lets an agent hand off a self-contained subtask to a fresh

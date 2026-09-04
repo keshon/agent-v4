@@ -3,7 +3,7 @@ package tools
 import (
 	"testing"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 func TestReadOnly_ContainsNoMutatingOrShellTools(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agent-v4/internal/workspace"
+	"tars/internal/workspace"
 )
 
 func TestMoveFile_PreservesContent(t *testing.T) {

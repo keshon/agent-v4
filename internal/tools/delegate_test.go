@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"agent-v4/internal/agent"
-	"agent-v4/internal/llm"
+	"tars/internal/agent"
+	"tars/internal/llm"
 )
 
 // stubSubClient returns a fixed answer with no tool calls, so spawned
