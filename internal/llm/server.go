@@ -130,14 +130,15 @@ type wireTool struct {
 }
 
 type wireRequest struct {
-	Model       string        `json:"model"`
-	Messages    []wireMessage `json:"messages"`
-	Tools       []wireTool    `json:"tools,omitempty"`
-	Grammar     string        `json:"grammar,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
-	TopP        float64       `json:"top_p,omitempty"`
-	TopK        int           `json:"top_k,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []wireMessage   `json:"messages"`
+	Tools          []wireTool      `json:"tools,omitempty"`
+	Grammar        string          `json:"grammar,omitempty"`
+	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	MaxTokens      int             `json:"max_tokens,omitempty"`
+	Temperature    float64         `json:"temperature,omitempty"`
+	TopP           float64         `json:"top_p,omitempty"`
+	TopK           int             `json:"top_k,omitempty"`
 
 	// Repetition controls. Both backends pass unknown fields through to
 	// the sampler, the same route the grammar field takes, and each
@@ -150,6 +151,13 @@ type wireRequest struct {
 	DRYMult       float64 `json:"dry_multiplier,omitempty"`
 	DRYBase       float64 `json:"dry_base,omitempty"`
 	DRYAllowed    int     `json:"dry_allowed_length,omitempty"`
+}
+
+// responseFormat is the OpenAI-style structured-output request that
+// llama-server accepts on the chat endpoint.
+type responseFormat struct {
+	Type   string          `json:"type"`
+	Schema json.RawMessage `json:"schema,omitempty"`
 }
 
 type wireResponse struct {
@@ -183,10 +191,8 @@ func (c *Server) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	// calls, which are schema constraints and correct on either backend)
 	// wins, then an explicit client override, then whatever this backend
 	// wants for ordinary responses.
-	grammar := req.Grammar
-	if grammar == "" {
-		grammar = c.Grammar
-	}
+	structured := req.Grammar != "" || req.JSONSchema != ""
+	grammar := c.Grammar
 	if grammar == "" && !c.NoGrammar {
 		grammar = c.dialect.contentGrammar()
 	}
@@ -196,11 +202,15 @@ func (c *Server) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	}
 	wreq := wireRequest{
 		Model:       c.model,
-		Grammar:     grammar,
 		MaxTokens:   req.MaxTokens,
 		Temperature: temperature,
 		TopP:        defaultTopP,
 		TopK:        defaultTopK,
+	}
+	if structured {
+		c.dialect.applyStructured(&wreq, req.Grammar, req.JSONSchema)
+	} else if grammar != "" {
+		c.dialect.applyStructured(&wreq, grammar, "")
 	}
 	c.dialect.applySampling(&wreq, c.DRY)
 

@@ -38,6 +38,13 @@ type dialect interface {
 	// tags into content is a leak worth blocking, while on llama-server
 	// with --jinja those tags are the protocol.
 	contentGrammar() string
+
+	// applyStructured asks for a constrained response in the form this
+	// backend actually accepts. koboldcpp takes a GBNF grammar as a
+	// pass-through field on the chat endpoint; llama-server takes
+	// response_format there and documents grammar only on /completion,
+	// where a grammar field is accepted and ignored without complaint.
+	applyStructured(req *wireRequest, gbnf, schema string)
 }
 
 func getJSON(ctx context.Context, hc *http.Client, url string, out any) error {

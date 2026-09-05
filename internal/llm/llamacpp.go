@@ -9,6 +9,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 )
 
@@ -34,6 +35,15 @@ func (llamaDialect) name() string { return "llama-server" }
 // "<|tool_call>" and its reasoning with "<|channel>thought", both of
 // which DefaultGrammar forbids at the first token.
 func (llamaDialect) contentGrammar() string { return "" }
+
+// applyStructured takes the schema and drops the GBNF. A raw grammar has
+// nowhere to go on the chat endpoint, so sending one constrains nothing.
+func (llamaDialect) applyStructured(req *wireRequest, gbnf, schema string) {
+	if schema == "" {
+		return
+	}
+	req.ResponseFormat = &responseFormat{Type: "json_object", Schema: json.RawMessage(schema)}
+}
 
 // llama-server spells the repetition penalty the way llama.cpp's sampler
 // does; the DRY fields happen to match koboldcpp's.

@@ -55,3 +55,65 @@ const DecisionGrammar = `root ::= "{" ws "\"verdict\"" ws ":" ws ("\"ok\"" | "\"
 schar ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt/] | "u" [0-9a-fA-F]{4})
 ws ::= [ \t\n]{0,4}
 `
+
+// PlanSchema is PlanGrammar expressed as JSON Schema, for backends that
+// constrain structured output that way rather than with GBNF.
+//
+// llama-server accepts `grammar` only on /completion; on
+// /v1/chat/completions it wants response_format, and silently ignores a
+// grammar field it does not understand. That silence cost a full mission
+// sweep: every plan call ran unconstrained, and the model degenerated
+// mid-JSON into a repeated token, leaving "unexpected end of JSON input"
+// in nine runs out of nine.
+//
+// Kept beside the grammar deliberately. Two encodings of one contract
+// will drift unless they are read together, and TestPlanSchemaMatches
+// GrammarBounds checks the bounds they share.
+const PlanSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subtasks"],
+  "properties": {
+    "subtasks": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id","milestone","title","goal","acceptance","files_hint","check"],
+        "properties": {
+          "id":         {"type": "string", "maxLength": 300},
+          "milestone":  {"type": "string", "maxLength": 300},
+          "title":      {"type": "string", "maxLength": 300},
+          "goal":       {"type": "string", "maxLength": 300},
+          "acceptance": {"type": "array", "minItems": 1, "maxItems": 5,
+                         "items": {"type": "string", "maxLength": 300}},
+          "files_hint": {"type": "array", "maxItems": 5,
+                         "items": {"type": "string", "maxLength": 300}},
+          "check": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type":     {"enum": ["shell","file_exists","content_contains","http","none"]},
+              "cmd":      {"type": "string", "maxLength": 300},
+              "path":     {"type": "string", "maxLength": 300},
+              "contains": {"type": "string", "maxLength": 300},
+              "url":      {"type": "string", "maxLength": 300}
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
+// DecisionSchema is DecisionGrammar as JSON Schema. See PlanSchema for
+// why both encodings exist.
+const DecisionSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "notes"],
+  "properties": {
+    "verdict": {"enum": ["ok", "gaps"]},
+    "notes":   {"type": "string", "maxLength": 300}
+  }
+}`

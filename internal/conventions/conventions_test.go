@@ -24,6 +24,7 @@ var checks = map[string]func(*testing.T, *repo){
 	"comment-dates":       checkCommentDates,
 	"cgo-free":            checkCgoFree,
 	"skill-paths":         checkSkillPaths,
+	"structured-output":   checkStructuredOutput,
 }
 
 func TestConventions(t *testing.T) {
@@ -426,4 +427,65 @@ func checkSkillPaths(t *testing.T, r *repo) {
 			}
 		}
 	}
+}
+
+// checkStructuredOutput requires both encodings on any constrained request.
+//
+// Found the expensive way: nine mission runs on llama-server planned with no
+// constraint at all, because the call sent a GBNF to an endpoint that takes
+// response_format. The backend answered 200 and the failure surfaced as
+// "output is not valid JSON" three layers away.
+func checkStructuredOutput(t *testing.T, r *repo) {
+	for _, f := range r.goFiles {
+		if strings.HasSuffix(f, "_test.go") ||
+			filepath.Base(filepath.Dir(f)) == "llm" {
+			continue // the llm package defines both fields and tests them directly
+		}
+		body := r.read(t, f)
+		for _, lit := range chatRequestLiterals(body) {
+			gbnf := strings.Contains(lit, "Grammar:")
+			schema := strings.Contains(lit, "JSONSchema:")
+			if gbnf == schema {
+				continue
+			}
+			has, missing := "Grammar", "JSONSchema"
+			if schema {
+				has, missing = missing, has
+			}
+			t.Errorf("%s: a ChatRequest sets %s without %s%s",
+				r.rel(f), has, missing, r.rule("structured-output"))
+		}
+	}
+}
+
+// chatRequestLiterals returns the body of each ChatRequest composite literal,
+// matched by brace depth so a nested struct field does not end it early.
+func chatRequestLiterals(body string) []string {
+	var out []string
+	for _, marker := range []string{"ChatRequest{", "ChatRequest {"} {
+		for i := 0; ; {
+			j := strings.Index(body[i:], marker)
+			if j < 0 {
+				break
+			}
+			start := i + j + len(marker)
+			depth, end := 1, -1
+			for k := start; k < len(body) && end < 0; k++ {
+				switch body[k] {
+				case '{':
+					depth++
+				case '}':
+					if depth--; depth == 0 {
+						end = k
+					}
+				}
+			}
+			if end < 0 {
+				break
+			}
+			out = append(out, body[start:end])
+			i = end
+		}
+	}
+	return out
 }

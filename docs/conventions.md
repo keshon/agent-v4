@@ -42,6 +42,13 @@ testable against a stub client with no filesystem in sight.
 A backend quirk handled inside the loop is a quirk that will be handled twice
 the next time a backend is added, and inconsistently the second time.
 
+**[enforced: structured-output]** A constrained `llm.ChatRequest` sets both
+`Grammar` and `JSONSchema`. The two are one contract in two encodings, and each
+backend reads only one of them: koboldcpp takes GBNF on the chat endpoint,
+llama-server takes `response_format` and ignores a grammar field there without
+complaint. Sending one encoding leaves the other backend generating free text
+that happens to be asked for JSON, which fails later and somewhere else.
+
 ## Dependencies
 
 **[enforced: cgo-free]** No package imports `C`. cgo turns a single `go build`

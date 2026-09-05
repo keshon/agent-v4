@@ -630,6 +630,7 @@ func (r *Runner) runReview(ctx context.Context, m *Mission) (gaps string, ok boo
 			Content: fmt.Sprintf(prompts.MissionVerdict, agent.TruncateMiddle(strings.TrimSpace(report), 3000)),
 		}},
 		Grammar:     DecisionGrammar,
+		JSONSchema:  DecisionSchema,
 		Temperature: planTemperature,
 		MaxTokens:   r.MaxTokens,
 	})

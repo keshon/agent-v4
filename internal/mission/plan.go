@@ -106,6 +106,7 @@ func generateSubtasks(ctx context.Context, client llm.Client, messages []llm.Mes
 		resp, cerr := client.Chat(ctx, llm.ChatRequest{
 			Messages:    msgs,
 			Grammar:     PlanGrammar,
+			JSONSchema:  PlanSchema,
 			Temperature: planTemperature,
 			MaxTokens:   req.MaxTokens,
 		})

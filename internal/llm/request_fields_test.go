@@ -165,3 +165,99 @@ func TestChat_DRYIsSentOnlyWhenEnabled(t *testing.T) {
 		t.Fatalf("DRY enabled but not sent, got: %s", captured)
 	}
 }
+
+// The bug this pair of tests exists for: llama-server documents `grammar`
+// under POST /completion only. On /v1/chat/completions it accepts the
+// field, ignores it, and answers 200. Nine mission runs planned with no
+// constraint at all and failed as "output is not valid JSON" before
+// anyone looked at what went out on the wire.
+//
+// So assert the wire form per backend, not just that something was set.
+func TestChat_StructuredRequestUsesTheFormEachBackendAccepts(t *testing.T) {
+	const gbnf = `root ::= "{}"`
+	const schema = `{"type":"object"}`
+
+	for _, tc := range []struct {
+		name                  string
+		newClient             func(string) *Server
+		wantGrammar, wantForm bool
+	}{
+		{"kobold takes GBNF", func(u string) *Server { return NewKoboldClient(u, "local") }, true, false},
+		{"llama takes response_format", func(u string) *Server { return NewLlamaClient(u, "local") }, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured []byte
+			srv := captureServer(t, &captured)
+			defer srv.Close()
+
+			if _, err := tc.newClient(srv.URL).Chat(context.Background(), ChatRequest{
+				Messages:   []Message{{Role: RoleUser, Content: "plan"}},
+				Grammar:    gbnf,
+				JSONSchema: schema,
+			}); err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+
+			var sent struct {
+				Grammar        string `json:"grammar"`
+				ResponseFormat *struct {
+					Type   string          `json:"type"`
+					Schema json.RawMessage `json:"schema"`
+				} `json:"response_format"`
+			}
+			if err := json.Unmarshal(captured, &sent); err != nil {
+				t.Fatalf("decode sent request: %v", err)
+			}
+
+			if got := sent.Grammar != ""; got != tc.wantGrammar {
+				t.Errorf("grammar sent = %v, want %v (%q)", got, tc.wantGrammar, sent.Grammar)
+			}
+			if got := sent.ResponseFormat != nil; got != tc.wantForm {
+				t.Fatalf("response_format sent = %v, want %v", got, tc.wantForm)
+			}
+			if tc.wantForm && string(sent.ResponseFormat.Schema) != schema {
+				t.Errorf("schema = %s, want %s", sent.ResponseFormat.Schema, schema)
+			}
+		})
+	}
+}
+
+// Every constrained call site must supply both encodings. Supplying only
+// the GBNF is silently unconstrained on llama; only the schema is
+// silently unconstrained on kobold. Neither backend complains.
+func TestChat_OneEncodingAloneLeavesABackendUnconstrained(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  ChatRequest
+	}{
+		{"GBNF only", ChatRequest{Grammar: `root ::= "{}"`}},
+		{"schema only", ChatRequest{JSONSchema: `{"type":"object"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var constrained int
+			for _, newClient := range []func(string) *Server{
+				func(u string) *Server { return NewKoboldClient(u, "local") },
+				func(u string) *Server { return NewLlamaClient(u, "local") },
+			} {
+				var captured []byte
+				srv := captureServer(t, &captured)
+
+				req := tc.req
+				req.Messages = []Message{{Role: RoleUser, Content: "plan"}}
+				if _, err := newClient(srv.URL).Chat(context.Background(), req); err != nil {
+					t.Fatalf("Chat: %v", err)
+				}
+				srv.Close()
+
+				if strings.Contains(string(captured), `"grammar"`) ||
+					strings.Contains(string(captured), `"response_format"`) {
+					constrained++
+				}
+			}
+			if constrained == 2 {
+				t.Error("both backends constrained by one encoding; " +
+					"if that is now true, drop the requirement to send both")
+			}
+		})
+	}
+}

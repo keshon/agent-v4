@@ -53,6 +53,10 @@ func (koboldDialect) name() string { return "koboldcpp" }
 // tool-call template can leak into what should be an answer.
 func (koboldDialect) contentGrammar() string { return DefaultGrammar }
 
+func (koboldDialect) applyStructured(req *wireRequest, gbnf, schema string) {
+	req.Grammar = gbnf
+}
+
 func (koboldDialect) applySampling(req *wireRequest, dry bool) {
 	req.RepPen = defaultRepPen
 	req.RepPenRange = defaultRepPenRange

@@ -61,6 +61,13 @@ type ChatRequest struct {
 	// field (koboldcpp/llama.cpp); others ignore it.
 	Grammar string
 
+	// JSONSchema is the same constraint expressed as JSON Schema, for
+	// backends that accept structured output that way instead. Supply
+	// both: which one reaches the wire is the dialect's decision, and a
+	// backend silently ignoring the form it does not take is how a whole
+	// mission sweep ran unconstrained.
+	JSONSchema string
+
 	// Temperature, if > 0, is sent to the backend for this call. Zero
 	// means "use the client's documented default" rather than "let the
 	// server decide": a local backend silently supplies its own value for
