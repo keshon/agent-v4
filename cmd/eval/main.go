@@ -238,6 +238,8 @@ func main() {
 	dry_ := flag.Bool("dry-sampler", false, "enable the DRY sampler — off by default because it "+
 		"penalizes verbatim repetition, which patch_file requires. Here so the choice can be measured "+
 		"rather than argued")
+	force := flag.Bool("force", false, "start even if another eval appears to be running against "+
+		"this backend — only correct when they use different backends")
 	requireModel := flag.String("require-model", "", "refuse to run unless the model the backend "+
 		"reports contains this substring — a local server loads whatever it was last started "+
 		"with, and comparing a score against one from different weights is worse than having no score")
@@ -272,6 +274,12 @@ func main() {
 	if len(probes) == 0 {
 		log.Fatalf("no probes matched in %s", *dir)
 	}
+
+	release, err := takeLock(*outDir, *force)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	defer release()
 
 	runDir := filepath.Join(*outDir, time.Now().Format("20060102-150405"))
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
