@@ -44,10 +44,9 @@ import (
 	"strings"
 	"time"
 
-	"tars/internal/agent"
 	"tars/internal/llm"
 	"tars/internal/mission"
-	"tars/internal/prompts"
+	"tars/internal/roles"
 	"tars/internal/tools"
 	"tars/internal/workspace"
 )
@@ -329,41 +328,22 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 			res.RunError = firstLine(err.Error())
 		}
 	} else {
-		// The toolset must match cmd/agent exactly. An eval that runs the
-		// agent without delegate_task and ask_user measures a different
-		// agent than the one that ships — and two probes (11 delegate
-		// trap, 12 ask_user) are specifically about whether those tools
-		// get reached for when they shouldn't be.
-		subTools := tools.Base(ws, procs)
-		spawnSub := func(role string) *agent.Agent {
-			return agent.New(agent.Config{
-				Client:       client,
-				Tools:        subTools,
-				System:       prompts.WithRole(role),
-				MaxSteps:     12,
-				MaxTokens:    maxTokens,
-				ContextLimit: contextLimit,
-				SkipVerify:   true,
-			})
-		}
-		// An eval can't answer a question, and a canned answer that
-		// pretends otherwise would make the probe score the answer rather
-		// than the agent. Say plainly that nobody is there; whether
-		// ask_user was reached for at all is still in the trace, which is
-		// what probe 12 actually scores.
-		askFn := func(string) (string, error) {
+		// roles.Interactive is what cmd/agent builds too, so the probe
+		// scores the agent that ships. This used to be a hand-copied
+		// config here and it had already drifted: no ask_user, no
+		// delegate_task, while two probes are specifically about whether
+		// those get reached for when they shouldn't be.
+		//
+		// The responder says plainly that nobody is there rather than
+		// faking an answer — dropping the tool would change the tool set,
+		// and inventing an answer would make the probe score the answer.
+		// Whether ask_user was called at all stays visible in the trace,
+		// which is what probe 12 measures.
+		env := evalEnv(client, ws, procs, contextLimit, maxTokens, record)
+		a := roles.Interactive(env, "", "", func(string) (string, error) {
 			return "This is an automated evaluation run; no human is available. " +
 				"State your assumption and proceed with the smallest reasonable action.", nil
-		}
-		a := agent.New(agent.Config{
-			Client: client,
-			Tools: tools.Base(ws, procs,
-				tools.AskUser{AskFn: askFn}, &tools.Delegate{Spawn: spawnSub}),
-			System:       prompts.System,
-			MaxTokens:    maxTokens,
-			ContextLimit: contextLimit,
-			OnStep:       record,
-		})
+		}, nil)
 		final, err := a.Run(runCtx, p.Task)
 		answer = final
 		if err != nil {
@@ -380,6 +360,22 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 	}
 	res.Passed = len(res.Failures) == 0
 	return res
+}
+
+// evalEnv adapts the harness's step recorder, which ignores labels
+// because a probe scores one agent at a time, to the labelled callback
+// roles.Env hands out.
+func evalEnv(client llm.Client, ws *workspace.Workspace, procs *tools.BackgroundProcesses,
+	contextLimit, maxTokens int, record func(int, llm.Message)) roles.Env {
+
+	return roles.Env{
+		Client:       client,
+		WS:           ws,
+		Procs:        procs,
+		MaxTokens:    maxTokens,
+		ContextLimit: contextLimit,
+		OnStep:       func(_ string, step int, msg llm.Message) { record(step, msg) },
+	}
 }
 
 func checkWorkspace(ctx context.Context, p Probe, ws *workspace.Workspace) []string {

@@ -153,6 +153,17 @@ type RunReport struct {
 
 // Report returns measured facts about the most recent Run/Resume,
 // including a partially filled report for a run that errored mid-way.
+// ToolNames returns the names of the tools this agent can call, sorted.
+// What an agent is allowed to do is a property worth asserting on rather
+// than assuming: a harness that builds its agent by hand can silently end
+// up with a different tool set than the one that ships.
+func (a *Agent) ToolNames() []string {
+	if a.cfg.Tools == nil {
+		return nil
+	}
+	return a.cfg.Tools.Names()
+}
+
 func (a *Agent) Report() RunReport {
 	return a.report
 }

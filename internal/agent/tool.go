@@ -67,6 +67,19 @@ func NewRegistry(tools ...Tool) *Registry {
 	return r
 }
 
+// Names returns this registry's tool names, sorted. What an agent may do
+// is worth asserting on rather than assuming — see internal/roles, where
+// a hand-assembled agent silently ended up with a smaller tool set than
+// the one that ships.
+func (r *Registry) Names() []string {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // Defs returns the tool definitions to hand to the LLM client.
 func (r *Registry) Defs() []llm.ToolDef {
 	names := make([]string, 0, len(r.tools))

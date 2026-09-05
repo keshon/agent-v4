@@ -13,6 +13,7 @@ import (
 	"tars/internal/agent"
 	"tars/internal/llm"
 	"tars/internal/prompts"
+	"tars/internal/roles"
 	"tars/internal/tools"
 	"tars/internal/workspace"
 )
@@ -259,21 +260,8 @@ func (r *Runner) runExplore(ctx context.Context, m *Mission) {
 	}
 
 	if !r.SkipMapNotes {
-		var onStep func(step int, msg llm.Message)
-		if r.OnStep != nil {
-			onStep = func(step int, msg llm.Message) { r.OnStep("explore", step, msg) }
-		}
-		annotator := agent.New(agent.Config{
-			Client:       r.Client,
-			Tools:        tools.ReadOnly(r.WS, r.Procs),
-			System:       prompts.MissionMapAnnotate,
-			MaxSteps:     8,
-			MaxTokens:    r.MaxTokens,
-			ContextLimit: r.ContextLimit,
-			SkipVerify:   true,
-			StateFile:    filepath.Join(r.Dir, "workers", "explore.json"),
-			OnStep:       onStep,
-		})
+		annotator := roles.Inspector(r.env(), "explore",
+			prompts.MissionMapAnnotate, "explore.json")
 		notes, err := annotator.Run(ctx, fmt.Sprintf(prompts.MissionMapAnnotateTask, m.Task, m.Map))
 		if err != nil {
 			r.event("explore: annotation worker failed (%v) — using mechanical map only", err)
@@ -544,35 +532,43 @@ func renderReplan(m *Mission, newSubs []Subtask, warnings []string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// newWorker builds the agent that executes one subtask attempt.
+//
+// ExpectsWrites is the interesting argument: the mission's checks are
+// mechanical, so the general self-check round is a redundant extra call
+// per subtask — EXCEPT for a worker about to finish having written
+// nothing on a subtask that was supposed to write, which is the
+// announce-without-write shape. A subtask that legitimately changes no
+// files must not be argued with.
 func (r *Runner) newWorker(sub *Subtask) *agent.Agent {
-	var onStep func(step int, msg llm.Message)
-	if r.OnStep != nil {
-		id := sub.ID
-		onStep = func(step int, msg llm.Message) { r.OnStep(id, step, msg) }
-	}
-	return agent.New(agent.Config{
-		Client:       r.Client,
-		Tools:        tools.Base(r.WS, r.Procs),
-		System:       prompts.MissionWorker,
-		MaxSteps:     r.maxWorkerSteps(),
-		MaxTokens:    r.MaxTokens,
-		ContextLimit: r.ContextLimit,
-		// The mission's checks are mechanical, so the general self-check
-		// round is a redundant extra call per subtask — EXCEPT when the
-		// worker is about to finish having written nothing on a subtask
-		// that was supposed to write: that's the announce-without-write
-		// shape, and a few in-context refusals are far cheaper than the
-		// fresh fix worker they prevent. A subtask that legitimately
-		// changes no files must not be argued with, hence ExpectsWrites.
-		SkipVerify:         true,
-		VerifyOnZeroWrites: sub.ExpectsWrites(),
-		StateFile:          r.workerStateFile(sub),
-		OnStep:             onStep,
-	})
+	return roles.Worker(r.env(), sub.ID, prompts.MissionWorker,
+		workerStateName(sub), r.maxWorkerSteps(), sub.ExpectsWrites())
 }
 
 func (r *Runner) workerStateFile(sub *Subtask) string {
-	return filepath.Join(r.Dir, "workers", fmt.Sprintf("%s-a%d.json", sub.ID, sub.Attempts))
+	return filepath.Join(r.Dir, "workers", workerStateName(sub))
+}
+
+// workerStateName is the transcript filename for one attempt, relative to
+// the workers directory — which is what roles.Env resolves against.
+func workerStateName(sub *Subtask) string {
+	return fmt.Sprintf("%s-a%d.json", sub.ID, sub.Attempts)
+}
+
+// env is the shared configuration every agent this Runner builds needs.
+// Before roles existed, the annotator, the worker and the reviewer each
+// assembled their own agent.Config inline and each wrapped r.OnStep in a
+// slightly different closure.
+func (r *Runner) env() roles.Env {
+	return roles.Env{
+		Client:       r.Client,
+		WS:           r.WS,
+		Procs:        r.Procs,
+		MaxTokens:    r.MaxTokens,
+		ContextLimit: r.ContextLimit,
+		StateDir:     filepath.Join(r.Dir, "workers"),
+		OnStep:       r.OnStep,
+	}
 }
 
 // latestWorkerState returns the newest saved transcript for a subtask,
@@ -602,21 +598,7 @@ func (r *Runner) latestWorkerState(subID string) string {
 func (r *Runner) runReview(ctx context.Context, m *Mission) (gaps string, ok bool) {
 	r.event("review: inspecting the finished work")
 
-	var onStep func(step int, msg llm.Message)
-	if r.OnStep != nil {
-		onStep = func(step int, msg llm.Message) { r.OnStep("review", step, msg) }
-	}
-	reviewer := agent.New(agent.Config{
-		Client:       r.Client,
-		Tools:        tools.ReadOnly(r.WS, r.Procs),
-		System:       prompts.MissionReview,
-		MaxSteps:     8,
-		MaxTokens:    r.MaxTokens,
-		ContextLimit: r.ContextLimit,
-		SkipVerify:   true,
-		StateFile:    filepath.Join(r.Dir, "workers", "review.json"),
-		OnStep:       onStep,
-	})
+	reviewer := roles.Inspector(r.env(), "review", prompts.MissionReview, "review.json")
 	report, err := reviewer.Run(ctx, fmt.Sprintf(prompts.MissionReviewTask,
 		m.Task, m.RenderPlan(), m.RenderReport()))
 	if err != nil {

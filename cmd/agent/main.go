@@ -21,6 +21,7 @@ import (
 	"tars/internal/llm"
 	"tars/internal/mission"
 	"tars/internal/prompts"
+	"tars/internal/roles"
 	"tars/internal/tools"
 	"tars/internal/workspace"
 )
@@ -187,41 +188,20 @@ func main() {
 		return strings.TrimSpace(line), nil
 	}
 
-	subTools := tools.Base(ws, bgProcs)
-	spawnSub := func(role string) *agent.Agent {
-		return agent.New(agent.Config{
-			Client:       client,
-			Tools:        subTools,
-			System:       prompts.WithRole(role),
-			MaxSteps:     12,
-			MaxTokens:    *maxTokens,
-			ContextLimit: contextLimit,
-			SkipVerify:   true,
-			Verify:       verify,
-		})
-	}
-
-	delegate := &tools.Delegate{Spawn: spawnSub}
-	mainTools := tools.Base(ws, bgProcs, tools.AskUser{AskFn: askFn}, delegate)
-
-	a := agent.New(agent.Config{
+	env := roles.Env{
 		Client:       client,
-		Tools:        mainTools,
-		System:       prompts.System,
+		WS:           ws,
+		Procs:        bgProcs,
 		MaxTokens:    *maxTokens,
 		ContextLimit: contextLimit,
-		StateFile:    stateFile,
-		Verify:       verify,
-		OnStep: func(step int, msg llm.Message) {
-			if msg.Content != "" {
-				fmt.Printf("[step %d] %s\n", step, agent.TruncateMiddle(msg.Content, *logMax))
-			}
-			for _, tc := range msg.ToolCalls {
-				fmt.Printf("[step %d] -> %s(%s)\n", step, tc.Name,
-					agent.TruncateMiddle(string(tc.Arguments), *logMax))
-			}
-		},
-	})
+		OnStep:       func(l string, s int, m llm.Message) { printStep(l, s, m, *logMax) },
+	}
+
+	// The subagent this spawns previously also carried Verify. That was
+	// dead configuration: a subagent sets SkipVerify with no
+	// VerifyOnZeroWrites, so verifyWanted is never true and the hook could
+	// not fire. Dropping it changes nothing at runtime.
+	a := roles.Interactive(env, "", stateFile, askFn, verify)
 
 	var result string
 	if *resume != "" {
@@ -353,5 +333,23 @@ func runMission(ctx context.Context, p missionParams) {
 	fmt.Println(report)
 	if err != nil {
 		log.Fatalf("%v", err)
+	}
+}
+
+// printStep renders one model step to the console. label is a subtask id
+// or worker name in mission mode and empty for the top-level agent, which
+// is the only difference between what the two modes used to print from
+// two separate copies of this loop.
+func printStep(label string, step int, msg llm.Message, logMax int) {
+	prefix := fmt.Sprintf("[step %d]", step)
+	if label != "" {
+		prefix = fmt.Sprintf("[%s step %d]", label, step)
+	}
+	if msg.Content != "" {
+		fmt.Printf("%s %s\n", prefix, agent.TruncateMiddle(msg.Content, logMax))
+	}
+	for _, tc := range msg.ToolCalls {
+		fmt.Printf("%s -> %s(%s)\n", prefix, tc.Name,
+			agent.TruncateMiddle(string(tc.Arguments), logMax))
 	}
 }
