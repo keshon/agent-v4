@@ -31,9 +31,10 @@ func main() {
 	model := flag.String("model", "local", "model name (often ignored by local servers)")
 	root := flag.String("workspace", ".", "workspace root the agent may read/write")
 	debug := flag.Bool("debug", false, "log raw request/response JSON to agent-debug.log")
-	grammar := flag.Bool("grammar", true, "constrain responses with a GBNF grammar that blocks "+
-		"leaked native tool-call template tags from appearing as plain text (disable if it "+
-		"breaks real tool calls on your backend)")
+	grammar := flag.Bool("grammar", true, "apply the backend's own content grammar. On koboldcpp "+
+		"that blocks a model writing its native tool-call tags as plain text; on llama-server there "+
+		"is none, because those tags are the protocol there and constraining them fights the "+
+		"grammar the server builds from the tool schemas")
 	maxTokens := flag.Int("max-tokens", 8192, "generation budget per response — too low truncates "+
 		"large outputs (e.g. a full HTML+CSS+JS file) mid-JSON")
 	resume := flag.String("resume", "", "path to a .agent/tasks/.../state.json snapshot to resume "+
@@ -113,9 +114,7 @@ func main() {
 	default:
 		log.Fatalf("unknown -backend-kind %q, want kobold or llama", *backendKind)
 	}
-	if *grammar {
-		client.Grammar = llm.DefaultGrammar
-	}
+	client.NoGrammar = !*grammar
 	if *debug {
 		f, err := os.Create("agent-debug.log")
 		if err != nil {

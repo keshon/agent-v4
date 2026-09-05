@@ -457,7 +457,6 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backendKind, backend
 	}
 
 	kobold := newBackend(backendKind, backend, model)
-	kobold.Grammar = llm.DefaultGrammar
 	kobold.DRY = drySampler
 	client := kobold
 

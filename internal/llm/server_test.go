@@ -161,7 +161,10 @@ func TestChat_GrammarFieldSentWhenSet(t *testing.T) {
 	}
 }
 
-func TestChat_GrammarFieldOmittedWhenUnset(t *testing.T) {
+// The content grammar is a backend property, not a caller setting: see
+// dialect.contentGrammar. NoGrammar is how a caller opts out, and this
+// checks the opt-out actually reaches the wire.
+func TestChat_NoGrammarSuppressesTheBackendGrammar(t *testing.T) {
 	var captured []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured, _ = io.ReadAll(r.Body)
@@ -170,7 +173,8 @@ func TestChat_GrammarFieldOmittedWhenUnset(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewKoboldClient(srv.URL, "local") // Grammar left unset
+	c := NewKoboldClient(srv.URL, "local")
+	c.NoGrammar = true
 
 	if _, err := c.Chat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: RoleUser, Content: "hello"}},

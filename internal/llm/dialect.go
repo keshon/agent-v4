@@ -30,77 +30,14 @@ type dialect interface {
 	// applySampling writes this backend's spelling of the sampler
 	// settings into an outgoing request.
 	applySampling(req *wireRequest, dry bool)
-}
 
-// --- koboldcpp ---
-
-type koboldDialect struct{}
-
-func (koboldDialect) name() string { return "koboldcpp" }
-
-func (koboldDialect) applySampling(req *wireRequest, dry bool) {
-	req.RepPen = defaultRepPen
-	req.RepPenRange = defaultRepPenRange
-	if dry {
-		req.DRYMult = defaultDRYMult
-		req.DRYBase = defaultDRYBase
-		req.DRYAllowed = defaultDRYAllowed
-	}
-}
-
-func (koboldDialect) contextLimit(ctx context.Context, hc *http.Client, baseURL string) (int, error) {
-	var out struct {
-		Value int `json:"value"`
-	}
-	err := getJSON(ctx, hc, baseURL+"/api/extra/true_max_context_length", &out)
-	return out.Value, err
-}
-
-func (koboldDialect) modelName(ctx context.Context, hc *http.Client, baseURL string) (string, error) {
-	var out struct {
-		Result string `json:"result"`
-	}
-	err := getJSON(ctx, hc, baseURL+"/api/v1/model", &out)
-	return out.Result, err
-}
-
-// --- llama-server ---
-
-type llamaDialect struct{}
-
-func (llamaDialect) name() string { return "llama-server" }
-
-// llama-server spells the repetition penalty the way llama.cpp's sampler
-// does; the DRY fields happen to match koboldcpp's.
-func (llamaDialect) applySampling(req *wireRequest, dry bool) {
-	req.RepeatPenalty = defaultRepPen
-	req.RepeatLastN = defaultRepPenRange
-	if dry {
-		req.DRYMult = defaultDRYMult
-		req.DRYBase = defaultDRYBase
-		req.DRYAllowed = defaultDRYAllowed
-	}
-}
-
-// /props carries both the loaded model's path and the context size the
-// server was actually started with.
-type llamaProps struct {
-	ModelPath string `json:"model_path"`
-	Default   struct {
-		NCtx int `json:"n_ctx"`
-	} `json:"default_generation_settings"`
-}
-
-func (llamaDialect) contextLimit(ctx context.Context, hc *http.Client, baseURL string) (int, error) {
-	var p llamaProps
-	err := getJSON(ctx, hc, baseURL+"/props", &p)
-	return p.Default.NCtx, err
-}
-
-func (llamaDialect) modelName(ctx context.Context, hc *http.Client, baseURL string) (string, error) {
-	var p llamaProps
-	err := getJSON(ctx, hc, baseURL+"/props", &p)
-	return p.ModelPath, err
+	// contentGrammar constrains an ordinary, non-structured response, or
+	// is empty for no constraint. It is a backend decision because the
+	// same tokens mean opposite things on the two servers: koboldcpp
+	// parses tool calls itself, so a model writing its native tool-call
+	// tags into content is a leak worth blocking, while on llama-server
+	// with --jinja those tags are the protocol.
+	contentGrammar() string
 }
 
 func getJSON(ctx context.Context, hc *http.Client, url string, out any) error {
