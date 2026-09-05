@@ -60,17 +60,17 @@ func TestCompileSeed_CarriesTaskLedgerAndFacts(t *testing.T) {
 	seed := CompileSeed(m, sub, "index.html\ngame.js")
 
 	for _, want := range []string{
-		"build a small site",                   // mission task, verbatim
-		"s1 [done] create html shell",          // ledger reinjection
-		"wrote: index.html; check: PASSED",     // measured facts ride along
-		"s2 [NOW] game loop",                   // cursor marker
-		"Your subtask (s2: game loop)",         // identity
+		"build a small site",                             // mission task, verbatim
+		"s1 [done] create html shell",                    // ledger reinjection
+		"wrote: index.html; check: PASSED",               // measured facts ride along
+		"s2 [NOW] game loop",                             // cursor marker
+		"Your subtask (s2: game loop)",                   // identity
 		"Add game.js with a requestAnimationFrame loop.", // goal verbatim
-		"- game.js exists",                     // acceptance bullets
+		"- game.js exists",                               // acceptance bullets
 		"- loop draws each frame",
-		"game.js, index.html",                  // files_hint ∪ mission-wide mutated
-		"file must exist: game.js",             // rendered check
-		"index.html\ngame.js",                  // workspace listing
+		"game.js, index.html",      // files_hint ∪ mission-wide mutated
+		"file must exist: game.js", // rendered check
+		"index.html\ngame.js",      // workspace listing
 	} {
 		if !strings.Contains(seed, want) {
 			t.Fatalf("seed missing %q:\n%s", want, seed)

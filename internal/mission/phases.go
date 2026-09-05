@@ -450,6 +450,15 @@ func (r *Runner) attempt(ctx context.Context, m *Mission, sub *Subtask, seed str
 	// worker that returned a confident report over an empty file fails.
 	checkOut, ok = RunCheck(ctx, sub.Check, r.WS)
 	if ok {
+		// The declared check passing only means the model verified what it
+		// chose to verify. Everything files_hint promised has to be there
+		// too, or a subtask can go green having produced one of the four
+		// files it said it would.
+		if out, passed := RunDerivedChecks(ctx, sub, r.WS); !passed {
+			checkOut, ok = out, false
+		}
+	}
+	if ok {
 		sub.AddFact("check: PASSED — %s", agent.TruncateMiddle(checkOut, 200))
 	} else {
 		sub.AddFact("check: FAILED — %s", agent.TruncateMiddle(checkOut, 2000))
@@ -653,6 +662,9 @@ func (r *Runner) runVerifyChecks(ctx context.Context, m *Mission) []string {
 			continue
 		}
 		out, ok := RunCheck(ctx, sub.Check, r.WS)
+		if ok {
+			out, ok = RunDerivedChecks(ctx, sub, r.WS)
+		}
 		if !ok {
 			sub.AddFact("final verify: FAILED — %s", agent.TruncateMiddle(out, 500))
 			regressions = append(regressions, fmt.Sprintf("%s: %s", sub.ID, agent.TruncateMiddle(out, 200)))

@@ -669,3 +669,41 @@ func TestRunner_Resume_SkipsDoneSubtasks(t *testing.T) {
 		t.Fatalf("model calls = %d, want 2 (worker only, no re-plan, no s1 re-run)", len(client.requests))
 	}
 }
+
+// The gap this closes (live): a subtask's acceptance demanded
+// package.json, vite.config.ts and src/main.ts. Its declared check tested
+// package.json for the string "vite". The worker wrote package.json, the
+// check passed, and the subtask went green with src/main.ts never
+// written — the model wrote its own exam and picked the easy question.
+func TestRunner_DerivedChecks_CatchFilesTheDeclaredCheckIgnores(t *testing.T) {
+	plan := `{"subtasks":[{"id":"s1","milestone":"scaffold","title":"scaffold the app",` +
+		`"goal":"Create package.json and the entry point.",` +
+		`"acceptance":["package.json lists vite","src/main.ts bootstraps the app"],` +
+		`"files_hint":["package.json","src/main.ts"],` +
+		`"check":{"type":"content_contains","path":"package.json","contains":"vite"}}]}`
+
+	client := &runnerClient{responses: script(
+		one(text(plan)),
+		// Writes only the file its own check looks at.
+		one(
+			toolCall("write_file", map[string]string{
+				"path": "package.json", "content": `{"devDependencies":{"vite":"^5"}}`}),
+			text("scaffolded the project"),
+		),
+	)}
+	r, _ := newRunner(t, client)
+	r.MaxFixAttempts = -1
+	r.MaxReplans = -1
+
+	m := &Mission{ID: "d1", Task: "scaffold a vite app", Phase: PhasePlan}
+	if _, err := r.Run(context.Background(), m); err == nil {
+		t.Fatal("mission passed with src/main.ts never written")
+	}
+	if m.Subtasks[0].Status != StatusFailed {
+		t.Fatalf("subtask status = %s, want failed", m.Subtasks[0].Status)
+	}
+	joined := strings.Join(m.Subtasks[0].Facts, "\n")
+	if !strings.Contains(joined, "src/main.ts") {
+		t.Fatalf("facts must name the missing file, got:\n%s", joined)
+	}
+}

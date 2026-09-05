@@ -46,11 +46,11 @@ const (
 // applies to everything else. file_exists / content_contains / http run
 // natively in Go; shell reuses the same OS-aware exec as -verify-cmd.
 type Check struct {
-	Type     string `json:"type"`                // "shell" | "file_exists" | "content_contains" | "http" | "none"
-	Cmd      string `json:"cmd,omitempty"`       // shell: the command line
-	Path     string `json:"path,omitempty"`      // file_exists / content_contains
-	Contains string `json:"contains,omitempty"`  // content_contains: substring that must appear
-	URL      string `json:"url,omitempty"`       // http: expect a 200 response
+	Type     string `json:"type"`               // "shell" | "file_exists" | "content_contains" | "http" | "none"
+	Cmd      string `json:"cmd,omitempty"`      // shell: the command line
+	Path     string `json:"path,omitempty"`     // file_exists / content_contains
+	Contains string `json:"contains,omitempty"` // content_contains: substring that must appear
+	URL      string `json:"url,omitempty"`      // http: expect a 200 response
 }
 
 // Render describes the check in plain language for prompts and reports.

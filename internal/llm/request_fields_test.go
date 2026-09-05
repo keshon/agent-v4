@@ -118,7 +118,13 @@ func TestChat_FinishReasonMapped(t *testing.T) {
 	}
 }
 
-func TestChat_TemperatureOmittedWhenZero(t *testing.T) {
+// Sampling is the harness's to decide, not the server's. A local backend
+// supplies its own default for any field omitted, so a score measured
+// under an unstated temperature cannot be compared with the next one —
+// the same class of silent variable as an unstated model. Zero still
+// never reaches the wire as a literal 0.0: greedy sampling makes a
+// grammar-constrained weak model loop on repeated tokens.
+func TestChat_UnsetTemperatureBecomesAnExplicitDefault(t *testing.T) {
 	var captured []byte
 	srv := captureServer(t, &captured)
 	defer srv.Close()
@@ -130,7 +136,12 @@ func TestChat_TemperatureOmittedWhenZero(t *testing.T) {
 		t.Fatalf("Chat: %v", err)
 	}
 
-	if strings.Contains(string(captured), `"temperature"`) {
-		t.Fatalf("expected no temperature field (backend default), got: %s", captured)
+	if !strings.Contains(string(captured), `"temperature":0.4`) {
+		t.Fatalf("expected an explicit temperature, got: %s", captured)
+	}
+	for _, field := range []string{`"rep_pen"`, `"dry_multiplier"`} {
+		if !strings.Contains(string(captured), field) {
+			t.Fatalf("expected %s to be sent, got: %s", field, captured)
+		}
 	}
 }

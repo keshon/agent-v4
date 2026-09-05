@@ -67,6 +67,26 @@ first ::= [^<\[` + "\\x00" + `] | "<think>"
 rest ::= [^` + "\\x00" + `]*
 `
 
+// Default sampling. These are sent on every request so that nothing is
+// left to whatever preset the server happened to start with: a local
+// backend silently supplies its own defaults for any field omitted, and
+// a score measured under unknown sampling cannot be compared to the next
+// one. Values here are deliberate and measurable, not inherited.
+//
+// DRY exists because of an observed collapse: a run whose context filled
+// with high-entropy base64 degenerated into a single token repeated for
+// hundreds of lines, then lost the task entirely. DRY penalizes verbatim
+// repetition of sequences without the broad quality cost of a high
+// repetition penalty, which is why rep_pen stays mild beside it.
+const (
+	defaultTemperature = 0.4
+	defaultRepPen      = 1.05
+	defaultRepPenRange = 1024
+	defaultDRYMult     = 0.8
+	defaultDRYBase     = 1.75
+	defaultDRYAllowed  = 2
+)
+
 func NewKoboldClient(baseURL, model string) *KoboldClient {
 	return &KoboldClient{
 		baseURL: baseURL,
@@ -111,6 +131,14 @@ type wireRequest struct {
 	Grammar     string        `json:"grammar,omitempty"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature,omitempty"`
+
+	// Repetition controls. koboldcpp passes unknown fields through to the
+	// sampler, the same route the grammar field takes.
+	RepPen      float64 `json:"rep_pen,omitempty"`
+	RepPenRange int     `json:"rep_pen_range,omitempty"`
+	DRYMult     float64 `json:"dry_multiplier,omitempty"`
+	DRYBase     float64 `json:"dry_base,omitempty"`
+	DRYAllowed  int     `json:"dry_allowed_length,omitempty"`
 }
 
 type wireResponse struct {
@@ -146,7 +174,21 @@ func (c *KoboldClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse,
 	if req.Grammar != "" {
 		grammar = req.Grammar
 	}
-	wreq := wireRequest{Model: c.model, Grammar: grammar, MaxTokens: req.MaxTokens, Temperature: req.Temperature}
+	temperature := req.Temperature
+	if temperature <= 0 {
+		temperature = defaultTemperature
+	}
+	wreq := wireRequest{
+		Model:       c.model,
+		Grammar:     grammar,
+		MaxTokens:   req.MaxTokens,
+		Temperature: temperature,
+		RepPen:      defaultRepPen,
+		RepPenRange: defaultRepPenRange,
+		DRYMult:     defaultDRYMult,
+		DRYBase:     defaultDRYBase,
+		DRYAllowed:  defaultDRYAllowed,
+	}
 
 	for _, m := range req.Messages {
 		wm := wireMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}

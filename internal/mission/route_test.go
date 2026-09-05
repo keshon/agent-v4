@@ -94,5 +94,3 @@ func TestSpecBrief_InlinesPlanMd(t *testing.T) {
 		t.Fatalf("brief missing plan contents: %q", brief)
 	}
 }
-
-

@@ -62,10 +62,14 @@ type ChatRequest struct {
 	Grammar string
 
 	// Temperature, if > 0, is sent to the backend for this call. Zero
-	// means "omit the field" and leave the backend's own default sampling
-	// untouched — there is deliberately no way to request a literal 0.0,
-	// because greedy sampling makes grammar-constrained weak models loop
-	// on repeated tokens. Structured calls use a low value (~0.3) to keep
+	// means "use the client's documented default" rather than "let the
+	// server decide": a local backend silently supplies its own value for
+	// any field omitted, and a measurement taken under unstated sampling
+	// cannot be compared with the next one.
+	//
+	// There is deliberately no way to request a literal 0.0 — greedy
+	// sampling makes a grammar-constrained weak model loop on repeated
+	// tokens. Structured calls (plan, verdict) pass a low value to keep
 	// output stable without inviting that failure.
 	Temperature float64
 }

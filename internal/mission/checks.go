@@ -122,3 +122,48 @@ func RunShellCommand(ctx context.Context, command, dir string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
+
+// DerivedChecks returns checks the harness derives from a subtask's own
+// plan, independent of the check the model chose for itself.
+//
+// A subtask declares up to five acceptance criteria and exactly one
+// mechanical check, and the model picks which one. It picks an easy one:
+// a plan whose acceptance demanded package.json, vite.config.ts AND
+// src/main.ts declared a check that tested package.json for the string
+// "vite", and the subtask went green with src/main.ts never written.
+//
+// files_hint is the structured statement of what the subtask will
+// produce, so every path in it is checked whatever the model chose to
+// verify. Acceptance prose is deliberately not parsed: guessing paths out
+// of a sentence produces failures nobody can act on.
+//
+// A path the declared check already names is skipped — a weaker
+// file_exists beside a content_contains on the same file adds nothing.
+func DerivedChecks(sub *Subtask) []Check {
+	seen := map[string]bool{}
+	if p := normalizePlanPath(sub.Check.Path); p != "" {
+		seen[p] = true
+	}
+	var out []Check
+	for _, hint := range sub.FilesHint {
+		p := normalizePlanPath(hint)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, Check{Type: "file_exists", Path: p})
+	}
+	return out
+}
+
+// RunDerivedChecks reports the first derived check that fails, or ok when
+// the subtask produced everything its plan said it would.
+func RunDerivedChecks(ctx context.Context, sub *Subtask, ws *workspace.Workspace) (output string, ok bool) {
+	for _, c := range DerivedChecks(sub) {
+		if out, passed := RunCheck(ctx, c, ws); !passed {
+			return fmt.Sprintf("%s (files_hint promised this subtask would produce it, "+
+				"and the declared check does not cover it)", out), false
+		}
+	}
+	return "", true
+}

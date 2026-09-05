@@ -130,3 +130,20 @@ func TestRunCheck_ContentContains(t *testing.T) {
 	}
 }
 
+func TestDerivedChecks_SkipsWhatTheDeclaredCheckAlreadyCovers(t *testing.T) {
+	sub := &Subtask{
+		FilesHint: []string{"index.html", "style.css"},
+		Check:     Check{Type: "content_contains", Path: "index.html", Contains: "<button"},
+	}
+	got := DerivedChecks(sub)
+	if len(got) != 1 || got[0].Path != "style.css" {
+		t.Fatalf("DerivedChecks = %+v, want one file_exists for style.css only", got)
+	}
+}
+
+func TestDerivedChecks_NothingToDeriveIsNotAFailure(t *testing.T) {
+	sub := &Subtask{FilesHint: nil, Check: Check{Type: "none"}}
+	if got := DerivedChecks(sub); len(got) != 0 {
+		t.Fatalf("DerivedChecks = %+v, want none", got)
+	}
+}
