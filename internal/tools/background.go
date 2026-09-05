@@ -5,7 +5,15 @@ import (
 	"fmt"
 	"os/exec"
 	"sync"
+	"time"
 )
+
+// stopGrace is how long stop waits for a killed process to actually be
+// reaped before reporting failure. Killing is asynchronous: taskkill and
+// SIGKILL both return before the OS has finished tearing the process
+// down, and until it has, the child still holds its open files — which
+// is what leaves a workspace directory undeletable after a run.
+const stopGrace = 3 * time.Second
 
 // syncBuffer is an io.Writer safe for a running process to write to while
 // check_background concurrently reads it.
@@ -55,6 +63,14 @@ func (p *BackgroundProcesses) start(cmd *exec.Cmd) (id string, output *syncBuffe
 	buf := &syncBuffer{}
 	cmd.Stdout = buf
 	cmd.Stderr = buf
+
+	// Wait waits for the I/O copying goroutines as well as the process,
+	// so a surviving grandchild that still holds the output pipe blocks
+	// it indefinitely — the process is gone and the harness never learns
+	// it. WaitDelay bounds that: once the process itself has exited, the
+	// pipes are closed and Wait returns rather than hanging on whatever
+	// the tree kill failed to reach.
+	cmd.WaitDelay = stopGrace
 	setNewProcessGroup(cmd)
 
 	p.mu.Lock()
@@ -92,6 +108,14 @@ func (p *BackgroundProcesses) status(id string) (output string, exited bool, exi
 	return proc.output.String(), proc.exited, proc.exitErr, nil
 }
 
+// stop kills a process tree and waits for it to be gone.
+//
+// The verdict is whether the process actually exited, never the exit
+// status of the tool used to kill it. taskkill reports failure when the
+// process has already gone (128) and when tree children vanish
+// mid-walk (255); syscall.Kill returns ESRCH for the same case. All of
+// those are success for a stop, and treating them as errors made this
+// fail intermittently with whichever code the race happened to produce.
 func (p *BackgroundProcesses) stop(id string) error {
 	p.mu.Lock()
 	proc, ok := p.procs[id]
@@ -102,7 +126,34 @@ func (p *BackgroundProcesses) stop(id string) error {
 	if proc.cmd.Process == nil {
 		return fmt.Errorf("process %q never started", id)
 	}
-	return killProcessGroup(proc.cmd)
+
+	killErr := killProcessGroup(proc.cmd)
+	if p.waitExited(id, stopGrace) {
+		return nil
+	}
+	if killErr != nil {
+		return fmt.Errorf("stopping %s: %w", id, killErr)
+	}
+	return fmt.Errorf("process %q did not exit within %s of being killed", id, stopGrace)
+}
+
+// waitExited reports whether the process has been reaped, polling the
+// flag the cmd.Wait goroutine sets.
+func (p *BackgroundProcesses) waitExited(id string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		p.mu.Lock()
+		proc, ok := p.procs[id]
+		exited := ok && proc.exited
+		p.mu.Unlock()
+		if exited {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // StopAll kills every process this set ever started, for a caller that
@@ -112,19 +163,18 @@ func (p *BackgroundProcesses) stop(id string) error {
 // won't delete or inherits a server on the same port; both look like
 // model failures and are neither.
 //
-// Best-effort by design: a process that already exited reports an error
-// from the OS, and that is the expected case, not a problem.
+// Errors are ignored — a process that already exited is the expected
+// case — but the wait is not: a caller about to delete the workspace
+// needs the children to have released their handles first.
 func (p *BackgroundProcesses) StopAll() {
 	p.mu.Lock()
-	procs := make([]*bgProc, 0, len(p.procs))
-	for _, proc := range p.procs {
-		procs = append(procs, proc)
+	ids := make([]string, 0, len(p.procs))
+	for id := range p.procs {
+		ids = append(ids, id)
 	}
 	p.mu.Unlock()
 
-	for _, proc := range procs {
-		if proc.cmd.Process != nil {
-			_ = killProcessGroup(proc.cmd)
-		}
+	for _, id := range ids {
+		_ = p.stop(id)
 	}
 }
