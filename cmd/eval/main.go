@@ -372,6 +372,15 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 		return res
 	}
 
+	// The agent ran but did not finish — it hit MaxSteps, or the backend
+	// died mid-run. The workspace may still satisfy every check by luck,
+	// which is how probe 06 scored green on a run whose own error said
+	// "reached max steps (25) without finishing". A run the harness had
+	// to cut off is not a pass.
+	if res.RunError != "" {
+		res.Failures = append(res.Failures, "run did not complete: "+res.RunError)
+	}
+
 	res.Failures = append(res.Failures, checkWorkspace(runCtx, p, ws)...)
 	res.Failures = append(res.Failures, checkTrace(p, calls)...)
 	res.Failures = append(res.Failures, checkAnswer(p, answer)...)

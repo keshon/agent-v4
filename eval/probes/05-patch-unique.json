@@ -2,13 +2,24 @@
   "prompt": "eval/prompts/05-patch-unique.md",
   "task": "in sample.go change Version from v1 to v2",
   "seed": "eval/fixtures",
-  "max_steps": 5,
   "verify": [
-    {"type": "content_contains", "path": "sample.go", "contains": "const Version = \"v2\""},
-    {"type": "content_contains", "path": "sample.go", "contains": "func Greet() string"}
+    {
+      "type": "content_contains",
+      "path": "sample.go",
+      "contains": "const Version = \"v2\""
+    },
+    {
+      "type": "content_contains",
+      "path": "sample.go",
+      "contains": "func Greet() string"
+    }
   ],
   "trace": [
-    {"tool": "write_file", "mode": "forbidden", "args_regex": "sample.go",
-     "why": "rewriting a whole file to change one constant is how surrounding code gets silently dropped — the Bye() assertion above is what catches it when it happens"}
+    {
+      "tool": "write_file",
+      "mode": "forbidden",
+      "args_regex": "sample.go",
+      "why": "rewriting a whole file to change one constant is how surrounding code gets silently dropped \u0432\u0402\u201d the Bye() assertion above is what catches it when it happens"
+    }
   ]
 }

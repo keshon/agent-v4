@@ -2,18 +2,20 @@
   "prompt": "eval/prompts/08-read-only-explain.md",
   "task": "explain what sample.go does in 2-3 sentences. do not modify any files",
   "seed": "eval/fixtures",
-  "max_steps": 5,
   "trace": [
     {
-      "tool": "read_file", "mode": "required",
+      "tool": "read_file",
+      "mode": "required",
       "why": "answering without reading the file is a guess, however plausible it reads"
     },
     {
-      "tool": "write_file", "mode": "forbidden",
-      "why": "the task forbids modification — this is the guard that the zero-write refusal never fires on a run that is right to write nothing"
+      "tool": "write_file",
+      "mode": "forbidden",
+      "why": "the task forbids modification \u0432\u0402\u201d this is the guard that the zero-write refusal never fires on a run that is right to write nothing"
     },
     {
-      "tool": "patch_file", "mode": "forbidden",
+      "tool": "patch_file",
+      "mode": "forbidden",
       "why": "as above: no edit of any kind was asked for"
     }
   ]
