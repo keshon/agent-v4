@@ -304,16 +304,14 @@ func (c *Server) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 	}, nil
 }
 
-// MaxContextLength asks the backend for the actual context size it was
-// loaded with (koboldcpp's /api/extra/true_max_context_length) — the real
-// ceiling for the model currently running, not a guess or a hardcoded
-// constant. Call once at startup and feed the result into
-// agent.Config.ContextLimit. If the backend doesn't support this endpoint
-// (older koboldcpp, or a different server), the caller should treat the
-// error as "budget tracking unavailable" and proceed without it rather
-// than failing the whole run.
 // MaxContextLength reports the context window the server was actually
-// started with, so budget tracking uses a fact rather than a guess.
+// started with, so budget tracking uses a fact rather than a guess. Call
+// once at startup and feed the result into agent.Config.ContextLimit.
+//
+// Each dialect asks over its own endpoint, so an error here is ambiguous:
+// the backend may be down, or it may be the other backend answering. Do
+// not treat it as "budget tracking unavailable" and continue — call
+// DetectKind to tell those apart first.
 func (c *Server) MaxContextLength(ctx context.Context) (int, error) {
 	return c.dialect.contextLimit(ctx, c.http, c.baseURL)
 }

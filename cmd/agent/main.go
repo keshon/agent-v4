@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/keshon/tars/internal/agent"
@@ -52,8 +54,10 @@ func main() {
 		"without it. Also auto-enabled when the task names ≥2 deliverable files (see -direct)")
 	direct := flag.Bool("direct", false, "force the reactive agent loop even when the task looks multi-file")
 	yes := flag.Bool("yes", false, "skip the mission plan approval gate and run the plan as generated")
-	backendKind := flag.String("backend-kind", "kobold", "which local server: kobold or llama "+
-		"(llama-server, worth running with --jinja for per-model tool-call formats)")
+	backendKind := flag.String("backend-kind", "kobold", "which local server: "+
+		strings.Join(llm.Kinds(), " or ")+". A wrong value is caught at startup rather "+
+		"than run: the dialects disagree about grammar, sampler fields and structured "+
+		"output, so a mismatched run completes and measures nothing")
 	flag.Parse()
 
 	task := strings.Join(flag.Args(), " ")
@@ -100,19 +104,14 @@ func main() {
 		}
 	}
 
-	ws, err := workspace.New(*root)
-	if err != nil {
-		log.Fatalf("workspace: %v", err)
+	ws, wsErr := workspace.New(*root)
+	if wsErr != nil {
+		log.Fatalf("workspace: %v", wsErr)
 	}
 
-	var client *llm.Server
-	switch *backendKind {
-	case "kobold":
-		client = llm.NewKoboldClient(*backend, *model)
-	case "llama":
-		client = llm.NewLlamaClient(*backend, *model)
-	default:
-		log.Fatalf("unknown -backend-kind %q, want kobold or llama", *backendKind)
+	client, err := llm.ClientFor(*backendKind, *backend, *model)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
 	client.NoGrammar = !*grammar
 	if *debug {
@@ -126,12 +125,26 @@ func main() {
 	}
 
 	// Ask the backend for its real context window instead of guessing.
-	// If it doesn't support this (older koboldcpp, different server),
-	// budget tracking just stays off — not a fatal error.
-	ctx := context.Background()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+
 	contextLimit, err := client.MaxContextLength(ctx)
 	if err != nil {
-		fmt.Printf("context budget tracking unavailable (%v) — continuing without it\n", err)
+		// The probe failing is evidence, not noise: each dialect asks a
+		// different endpoint, so if the OTHER one answers, -backend-kind
+		// is wrong. Continuing is worse than stopping, because the
+		// dialects disagree about the grammar field, the sampler field
+		// names and the structured-output mechanism: the run completes
+		// having measured nothing. Nine mission runs did exactly that
+		// before this check existed.
+		if actual := llm.DetectKind(ctx, *backend); actual != "" && actual != *backendKind {
+			log.Fatalf("-backend-kind is %q but %s is answering at %s.\n"+
+				"Re-run with -backend-kind %s. Continuing would send %s's grammar and\n"+
+				"sampler fields to a server that ignores both, and the run would look fine.",
+				*backendKind, actual, *backend, actual, *backendKind)
+		}
+		// Otherwise the backend is simply not reporting: keep going
+		// without budget tracking rather than failing the whole run.
 		contextLimit = 0
 	} else {
 		fmt.Printf("context window: %d tokens\n", contextLimit)
@@ -156,6 +169,32 @@ func main() {
 	// processes — a process started by one half of the conversation
 	// should be checkable/stoppable from the other.
 	bgProcs := tools.NewBackgroundProcesses()
+	defer bgProcs.StopAll()
+
+	// Ctrl+C previously killed the agent and left whatever it had started
+	// running: a dev server, a watcher, a test process. The eval harness
+	// deferred StopAll and the binary people actually run did not, which
+	// is also why the process-tree kill exists on Windows and was never
+	// reached from here.
+	//
+	// The loop snapshots state after every step, so an interrupt is
+	// recoverable — but only if the operator is told where the snapshot
+	// is, at the moment they need it rather than in the scrollback.
+	// os.Exit skips deferred calls, so this path cleans up for itself.
+	resumeHint := fmt.Sprintf("agent -resume %s", stateFile)
+	if missionDir != "" {
+		resumeHint = fmt.Sprintf("agent -resume %s", missionDir)
+	}
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		fmt.Fprintln(os.Stderr, "\ninterrupted")
+		stop() // aborts the in-flight request and any running tool
+		bgProcs.StopAll()
+		fmt.Fprintf(os.Stderr, "resume with: %s\n", resumeHint)
+		os.Exit(130) // 128 + SIGINT, the shell convention
+	}()
 
 	if missionDir != "" {
 		runMission(ctx, missionParams{
@@ -247,8 +286,13 @@ func main() {
 			log.Fatalf("agent failed: %v", err)
 		}
 	}
+	// Printed whole. -log-max caps each *step* line so a run stays
+	// readable while it scrolls past; the final answer is the thing the
+	// run was for, and middle-truncating it to 300 characters cut the
+	// deliverable out of its own report. Mission mode already printed its
+	// report in full, so this also makes the two modes agree.
 	fmt.Println("\n=== result ===")
-	fmt.Println(agent.TruncateMiddle(result, *logMax))
+	fmt.Println(result)
 }
 
 type missionParams struct {

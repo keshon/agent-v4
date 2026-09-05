@@ -316,10 +316,22 @@ func main() {
 	// quantization is the exact mistake this tool exists to prevent.
 	probe := newBackend(*backendKind, *backend, *model)
 	ctx := context.Background()
-	contextLimit, _ := probe.MaxContextLength(ctx)
+	contextLimit, ctxErr := probe.MaxContextLength(ctx)
 	backendModel, err := probe.ModelName(ctx)
 	if err != nil {
 		backendModel = "(unknown)"
+	}
+	// Both probes above are dialect-specific endpoints, so both failing
+	// usually means -backend-kind is wrong rather than the server being
+	// down. Without this the run continued at context 0 against model
+	// "(unknown)", and -require-model then blamed the model for what was
+	// a flag mistake. Every score in that run would be a measurement of
+	// a client talking the wrong protocol.
+	if ctxErr != nil && err != nil {
+		if actual := llm.DetectKind(ctx, *backend); actual != "" && actual != *backendKind {
+			log.Fatalf("-backend-kind is %q but %s is answering at %s - re-run with "+
+				"-backend-kind %s", *backendKind, actual, *backend, actual)
+		}
 	}
 	// Live on 2026-09-05: koboldcpp was restarted and came back holding
 	// different weights, so a 4/8 looked like a refactor regression next
@@ -434,15 +446,11 @@ func main() {
 // silently defaulting: a run against the wrong backend is the same class
 // of wasted measurement as a run against the wrong model.
 func newBackend(kind, baseURL, model string) *llm.Server {
-	switch kind {
-	case "kobold":
-		return llm.NewKoboldClient(baseURL, model)
-	case "llama":
-		return llm.NewLlamaClient(baseURL, model)
-	default:
-		log.Fatalf("unknown -backend-kind %q, want kobold or llama", kind)
-		return nil
+	c, err := llm.ClientFor(kind, baseURL, model)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
+	return c
 }
 
 func keepTier(probes []Probe, tier string) []Probe {

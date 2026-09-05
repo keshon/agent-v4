@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 )
 
 // A dialect is the small part of a local model server that is not
@@ -64,4 +66,59 @@ func getJSON(ctx context.Context, hc *http.Client, url string, out any) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 	return nil
+}
+
+// kinds maps a -backend-kind flag value to its dialect. One table, so the
+// flag documentation, the client constructor and the mismatch probe
+// cannot drift apart about what "llama" means.
+var kinds = []struct {
+	kind    string
+	dialect dialect
+}{
+	{"kobold", koboldDialect{}},
+	{"llama", llamaDialect{}},
+}
+
+// Kinds lists the accepted -backend-kind values, for flag help and error
+// messages that stay correct when a backend is added.
+func Kinds() []string {
+	out := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		out = append(out, k.kind)
+	}
+	return out
+}
+
+// ClientFor builds the client for a -backend-kind value.
+func ClientFor(kind, baseURL, model string) (*Server, error) {
+	for _, k := range kinds {
+		if k.kind == kind {
+			return newServer(baseURL, model, k.dialect), nil
+		}
+	}
+	return nil, fmt.Errorf("unknown backend kind %q, want one of %s",
+		kind, strings.Join(Kinds(), " or "))
+}
+
+// DetectKind reports which backend is actually answering at baseURL, or
+// "" if neither identifies itself.
+//
+// Each dialect asks a different server for its context window over a
+// different endpoint, so the probe that succeeds names the server that is
+// really there. That makes a wrong -backend-kind detectable rather than
+// merely survivable, which matters because surviving it is worse: the
+// dialects disagree about the grammar field, the sampler field names and
+// the structured-output mechanism, so a mismatched run completes and
+// silently measures nothing. Nine mission runs did exactly that.
+//
+// Best-effort and quick. A backend that is simply down probes as "" and
+// the caller reports that as the missing information it is.
+func DetectKind(ctx context.Context, baseURL string) string {
+	hc := &http.Client{Timeout: 5 * time.Second}
+	for _, k := range kinds {
+		if n, err := k.dialect.contextLimit(ctx, hc, baseURL); err == nil && n > 0 {
+			return k.kind
+		}
+	}
+	return ""
 }
