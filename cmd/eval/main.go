@@ -169,15 +169,29 @@ type countingClient struct {
 	// result is about the model or about the context filling up, and
 	// without it that question costs a trawl through the raw trace.
 	peakPrompt int64
+
+	// floorPrompt is the smallest, which on the first call of a run is
+	// essentially the fixed cost: system prompt plus tool schemas plus a
+	// one-line task. Measured because that floor turned out to be most of
+	// a small prompt — roughly 1,700 tokens of the ~2,000 a simple probe
+	// uses — so the pair says how much of a result is the work and how
+	// much is boilerplate the harness sends on every call.
+	floorPrompt int64
 }
 
 func (c *countingClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	atomic.AddInt64(&c.calls, 1)
 	resp, err := c.inner.Chat(ctx, req)
+	got := int64(resp.Usage.PromptTokens)
 	for {
-		got := int64(resp.Usage.PromptTokens)
 		peak := atomic.LoadInt64(&c.peakPrompt)
 		if got <= peak || atomic.CompareAndSwapInt64(&c.peakPrompt, peak, got) {
+			break
+		}
+	}
+	for got > 0 {
+		floor := atomic.LoadInt64(&c.floorPrompt)
+		if (floor != 0 && got >= floor) || atomic.CompareAndSwapInt64(&c.floorPrompt, floor, got) {
 			break
 		}
 	}
@@ -207,6 +221,11 @@ type Result struct {
 	// 90% is a context story; the same failure at 5% is not.
 	PeakPromptTokens int `json:"peak_prompt_tokens,omitempty"`
 	PeakContextPct   int `json:"peak_context_pct,omitempty"`
+
+	// FloorPromptTokens is the smallest prompt of the run, which is
+	// essentially what the harness costs before any work: system prompt
+	// plus tool schemas. Peak minus floor is the conversation.
+	FloorPromptTokens int `json:"floor_prompt_tokens,omitempty"`
 
 	// Tools counts calls by name — the shape of a run in one line,
 	// without opening the trace.
@@ -322,10 +341,14 @@ func main() {
 		probe Probe
 		run   int
 	}
+	// Exclusive probes are only special when something else could run
+	// beside them. At one job everything is sequential already, and
+	// hoisting them to the front just scrambles the reading order.
+	concurrent := max(*jobsN, 1) > 1
 	var jobs, exclusive []job
 	for _, p := range probes {
 		for run := 1; run <= *runs; run++ {
-			if p.Exclusive {
+			if p.Exclusive && concurrent {
 				exclusive = append(exclusive, job{p, run})
 			} else {
 				jobs = append(jobs, job{p, run})
@@ -564,6 +587,7 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backendKind, backend
 	res.Failures = append(res.Failures, checkAnswer(p, answer)...)
 
 	res.PeakPromptTokens = int(atomic.LoadInt64(&counter.peakPrompt))
+	res.FloorPromptTokens = int(atomic.LoadInt64(&counter.floorPrompt))
 	if contextLimit > 0 {
 		res.PeakContextPct = res.PeakPromptTokens * 100 / contextLimit
 	}
