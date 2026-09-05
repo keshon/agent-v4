@@ -22,6 +22,7 @@ var checks = map[string]func(*testing.T, *repo){
 	"probe-prompts":       checkProbePrompts,
 	"doc-identifiers":     checkDocIdentifiers,
 	"comment-dates":       checkCommentDates,
+	"cgo-free":            checkCgoFree,
 }
 
 func TestConventions(t *testing.T) {
@@ -381,4 +382,17 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// cgoImport matches the pseudo-package cgo uses, in either import form.
+var cgoImport = regexp.MustCompile(`(?m)^\s*(?:import\s+)?_?\s*"C"\s*$`)
+
+// checkCgoFree keeps `go build` a single step on every platform this can
+// plausibly run on.
+func checkCgoFree(t *testing.T, r *repo) {
+	for _, f := range r.goFiles {
+		if cgoImport.MatchString(r.read(t, f)) {
+			t.Errorf("%s imports C%s", r.rel(f), r.rule("cgo-free"))
+		}
+	}
 }

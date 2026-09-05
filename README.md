@@ -1,6 +1,11 @@
 # TARS
 
-A coding agent for local LLMs. Go, no dependencies outside the standard library.
+A coding agent for local LLMs, in Go.
+
+Dependencies are kept to the standard library plus `golang.org/x/sys`, which is
+needed for Windows job objects — there is no standard-library way to kill a
+process tree whose parent has already exited. A third-party package is
+considered only if it is cgo-free, popular, and does something worth the weight.
 
 Aimed at small local models (12–35B) served by koboldcpp, llama.cpp or LM Studio.
 Correctness comes from the harness — mechanical checks, hard repeat guards, bounded

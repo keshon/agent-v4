@@ -42,6 +42,17 @@ testable against a stub client with no filesystem in sight.
 A backend quirk handled inside the loop is a quirk that will be handled twice
 the next time a backend is added, and inconsistently the second time.
 
+## Dependencies
+
+**[enforced: cgo-free]** No package imports `C`. cgo turns a single `go build`
+into a toolchain problem, breaks cross-compilation, and is not worth it for a
+tool whose whole job is to run somewhere unattended.
+
+**[practice]** The standard library first. A third-party package is considered
+only if it is cgo-free, widely used, and earns its weight — `golang.org/x/sys`
+qualifies because Windows job objects have no standard-library equivalent and
+without them a stopped dev server can survive, still holding its port.
+
 ## Building agents
 
 **[enforced: agent-construction]** Only `internal/roles` calls `agent.New`.

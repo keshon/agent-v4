@@ -7,21 +7,25 @@ import (
 	"syscall"
 )
 
-// setNewProcessGroup puts cmd in its own process group before it starts,
-// so killProcessGroup can take down the whole subtree (e.g. sh -> npm ->
-// node) instead of just the immediate child.
-func setNewProcessGroup(cmd *exec.Cmd) {
+// processGroup puts a background command in its own process group so the
+// whole subtree (sh -> npm -> node) can be signalled at once. Killing only
+// the direct child leaves the real server running as an orphan, and that
+// orphan holding the output pipe is what makes cmd.Wait block.
+type processGroup struct{}
+
+func newProcessGroup() *processGroup { return &processGroup{} }
+
+func (g *processGroup) beforeStart(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// killProcessGroup signals the entire process group, not just cmd's
-// direct PID. Without this, killing a shell wrapper can leave its actual
-// child (the real dev server) running as an orphan — and that orphan
-// holding the output pipe open is exactly what makes cmd.Wait() hang
-// forever waiting for EOF that will never come.
-func killProcessGroup(cmd *exec.Cmd) error {
+func (g *processGroup) afterStart(cmd *exec.Cmd) error { return nil }
+
+func (g *processGroup) kill(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
 	}
 	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
+
+func (g *processGroup) release() {}

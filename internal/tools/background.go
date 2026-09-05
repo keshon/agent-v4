@@ -36,6 +36,7 @@ func (s *syncBuffer) String() string {
 
 type bgProc struct {
 	cmd     *exec.Cmd
+	group   *processGroup
 	output  *syncBuffer
 	exited  bool
 	exitErr error
@@ -71,22 +72,28 @@ func (p *BackgroundProcesses) start(cmd *exec.Cmd) (id string, output *syncBuffe
 	// pipes are closed and Wait returns rather than hanging on whatever
 	// the tree kill failed to reach.
 	cmd.WaitDelay = stopGrace
-	setNewProcessGroup(cmd)
+
+	group := newProcessGroup()
+	group.beforeStart(cmd)
 
 	p.mu.Lock()
 	p.next++
 	id = fmt.Sprintf("bg%d", p.next)
-	proc := &bgProc{cmd: cmd, output: buf}
+	proc := &bgProc{cmd: cmd, group: group, output: buf}
 	p.procs[id] = proc
 	p.mu.Unlock()
 
 	if err := cmd.Start(); err != nil {
+		group.release()
 		p.mu.Lock()
 		proc.exited = true
 		proc.exitErr = err
 		p.mu.Unlock()
 		return id, buf
 	}
+	// A failure to adopt the process is not fatal — the tree kill falls
+	// back to walking PIDs, which is what it did before job objects.
+	_ = group.afterStart(cmd)
 
 	go func() {
 		err := cmd.Wait()
@@ -127,8 +134,9 @@ func (p *BackgroundProcesses) stop(id string) error {
 		return fmt.Errorf("process %q never started", id)
 	}
 
-	killErr := killProcessGroup(proc.cmd)
+	killErr := proc.group.kill(proc.cmd)
 	if p.waitExited(id, stopGrace) {
+		proc.group.release()
 		return nil
 	}
 	if killErr != nil {
