@@ -419,7 +419,9 @@ func validateCheck(s *Subtask, existing map[string]bool) (errs []string) {
 		case vacuousShellCheck(cmd):
 			errs = append(errs, fmt.Sprintf("%s: shell check %q always succeeds and verifies nothing", s.ID, c.Cmd))
 		default:
-			if reason := unsatisfiableShellCheck(cmd); reason != "" {
+			if reason := mutatingShellCheck(cmd); reason != "" {
+				errs = append(errs, fmt.Sprintf("%s: shell check %q %s", s.ID, c.Cmd, reason))
+			} else if reason := unsatisfiableShellCheck(cmd); reason != "" {
 				errs = append(errs, fmt.Sprintf("%s: shell check %q %s", s.ID, c.Cmd, reason))
 			} else if reason := missingCommand(cmd); reason != "" {
 				errs = append(errs, fmt.Sprintf("%s: shell check %q %s", s.ID, c.Cmd, reason))
@@ -551,4 +553,72 @@ func vacuousShellCheck(cmd string) bool {
 		return true
 	}
 	return false
+}
+
+// mutatingShellCheck flags a check that performs the subtask instead of
+// verifying it.
+//
+// Live on 2026-09-05, probe 16-mission-fix, three runs out of three. The
+// subtask was "create numbers.txt" and the model gave it this check:
+//
+//	python -c "with open('numbers.txt', 'w') as f: f.write('3\n5\n34\n')"
+//
+// It writes the file. Had it run, the check would have passed for every
+// plan whether or not the worker did anything, because the check was the
+// work. It did not run: the embedded quoting does not survive cmd.exe, so
+// it exited 1, burned the three fix attempts and killed the mission.
+// Either outcome is bad, and they are the same defect — a check must
+// observe, not act.
+//
+// Deliberately narrow. Redirection and a write-mode open are unambiguous;
+// a mutating first word is judged only in that position, so `grep -q '>'
+// f` and `python stats.py | findstr /x 42` stay legal. A check that
+// mutates in some way not listed here still gets through, and that is the
+// right trade against rejecting plans that were fine.
+func mutatingShellCheck(cmd string) string {
+	// Redirection, ignoring fd duplication like 2>&1 and >&2.
+	for i := 0; i < len(cmd); i++ {
+		if cmd[i] != '>' {
+			continue
+		}
+		if i+1 < len(cmd) && cmd[i+1] == '&' {
+			continue // >&
+		}
+		if i > 0 && cmd[i-1] == '&' {
+			continue // &> — still a redirect, but caught by the next rule
+		}
+		if i > 0 && (cmd[i-1] == '=' || cmd[i-1] == '<' || cmd[i-1] == '-') {
+			continue // >=, <>, ->
+		}
+		if i > 0 && cmd[i-1] == '2' && i+1 < len(cmd) && cmd[i+1] == '&' {
+			continue
+		}
+		return "writes instead of verifying (shell redirection) — a check must " +
+			"observe the result, not produce it"
+	}
+
+	// A write-mode open in an inline script.
+	if strings.Contains(cmd, "open(") {
+		for _, mode := range []string{`'w'`, `"w"`, `'a'`, `"a"`, `'x'`, `"x"`,
+			`'wb'`, `"wb"`, `'w+'`, `"w+"`} {
+			if strings.Contains(cmd, mode) {
+				return "writes instead of verifying (opens a file for writing) — " +
+					"a check must observe the result, not produce it"
+			}
+		}
+	}
+
+	// A mutating command in leading position. Only there: these words are
+	// harmless as arguments or inside a pattern.
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	switch fields[0] {
+	case "touch", "mkdir", "rm", "del", "rmdir", "mv", "ren", "rename",
+		"cp", "copy", "tee", "truncate":
+		return "runs a command that changes the workspace — a check must " +
+			"observe the result, not produce it"
+	}
+	return ""
 }
