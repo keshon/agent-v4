@@ -15,9 +15,10 @@ import (
 	"time"
 )
 
-type KoboldClient struct {
+type Server struct {
 	baseURL string
 	model   string
+	dialect dialect
 	http    *http.Client
 
 	// Debug, if set, receives the raw JSON request and response bodies
@@ -98,13 +99,35 @@ const (
 	defaultDRYAllowed  = 2
 )
 
-func NewKoboldClient(baseURL, model string) *KoboldClient {
-	return &KoboldClient{
+// NewKoboldClient talks to a koboldcpp server.
+func NewKoboldClient(baseURL, model string) *Server {
+	return newServer(baseURL, model, koboldDialect{})
+}
+
+// NewLlamaClient talks to a llama.cpp llama-server.
+//
+// Worth running with --jinja: llama-server then applies the model's own
+// chat template and its per-model tool-call format, and constrains tool
+// arguments with a grammar derived from the tool's JSON schema. That is
+// the same job the DefaultGrammar blocklist here does badly, done
+// properly and per model.
+func NewLlamaClient(baseURL, model string) *Server {
+	return newServer(baseURL, model, llamaDialect{})
+}
+
+func newServer(baseURL, model string, d dialect) *Server {
+	return &Server{
 		baseURL: baseURL,
 		model:   model,
-		http:    &http.Client{Timeout: 120 * time.Minute},
+		dialect: d,
+		// Long: a full context on a local model can take minutes to
+		// process before a single token is generated.
+		http: &http.Client{Timeout: 120 * time.Minute},
 	}
 }
+
+// Backend names the server this client talks to, for recorded results.
+func (c *Server) Backend() string { return c.dialect.name() }
 
 // --- wire format for the OpenAI-compatible endpoint ---
 
@@ -143,13 +166,17 @@ type wireRequest struct {
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature,omitempty"`
 
-	// Repetition controls. koboldcpp passes unknown fields through to the
-	// sampler, the same route the grammar field takes.
-	RepPen      float64 `json:"rep_pen,omitempty"`
-	RepPenRange int     `json:"rep_pen_range,omitempty"`
-	DRYMult     float64 `json:"dry_multiplier,omitempty"`
-	DRYBase     float64 `json:"dry_base,omitempty"`
-	DRYAllowed  int     `json:"dry_allowed_length,omitempty"`
+	// Repetition controls. Both backends pass unknown fields through to
+	// the sampler, the same route the grammar field takes, and each
+	// dialect fills only its own spelling — koboldcpp's rep_pen or
+	// llama-server's repeat_penalty. The DRY names happen to agree.
+	RepPen        float64 `json:"rep_pen,omitempty"`
+	RepPenRange   int     `json:"rep_pen_range,omitempty"`
+	RepeatPenalty float64 `json:"repeat_penalty,omitempty"`
+	RepeatLastN   int     `json:"repeat_last_n,omitempty"`
+	DRYMult       float64 `json:"dry_multiplier,omitempty"`
+	DRYBase       float64 `json:"dry_base,omitempty"`
+	DRYAllowed    int     `json:"dry_allowed_length,omitempty"`
 }
 
 type wireResponse struct {
@@ -168,7 +195,7 @@ type wireResponse struct {
 // running instead of only after it exits.
 type debugSyncer interface{ Sync() error }
 
-func (c *KoboldClient) logDebug(format string, args ...any) {
+func (c *Server) logDebug(format string, args ...any) {
 	if c.Debug == nil {
 		return
 	}
@@ -178,7 +205,7 @@ func (c *KoboldClient) logDebug(format string, args ...any) {
 	}
 }
 
-func (c *KoboldClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+func (c *Server) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	// A per-request grammar (structured plan/verdict calls) wins over the
 	// client-level default; both empty means no constraint at all.
 	grammar := c.Grammar
@@ -194,14 +221,8 @@ func (c *KoboldClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse,
 		Grammar:     grammar,
 		MaxTokens:   req.MaxTokens,
 		Temperature: temperature,
-		RepPen:      defaultRepPen,
-		RepPenRange: defaultRepPenRange,
 	}
-	if c.DRY {
-		wreq.DRYMult = defaultDRYMult
-		wreq.DRYBase = defaultDRYBase
-		wreq.DRYAllowed = defaultDRYAllowed
-	}
+	c.dialect.applySampling(&wreq, c.DRY)
 
 	for _, m := range req.Messages {
 		wm := wireMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}
@@ -301,30 +322,10 @@ func (c *KoboldClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse,
 // (older koboldcpp, or a different server), the caller should treat the
 // error as "budget tracking unavailable" and proceed without it rather
 // than failing the whole run.
-func (c *KoboldClient) MaxContextLength(ctx context.Context) (int, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/api/extra/true_max_context_length", nil)
-	if err != nil {
-		return 0, fmt.Errorf("build request: %w", err)
-	}
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return 0, fmt.Errorf("call backend: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("backend returned %s", resp.Status)
-	}
-
-	var out struct {
-		Value int `json:"value"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return 0, fmt.Errorf("decode response: %w", err)
-	}
-	return out.Value, nil
+// MaxContextLength reports the context window the server was actually
+// started with, so budget tracking uses a fact rather than a guess.
+func (c *Server) MaxContextLength(ctx context.Context) (int, error) {
+	return c.dialect.contextLimit(ctx, c.http, c.baseURL)
 }
 
 // ModelName asks the backend which model is actually loaded, which is
@@ -332,32 +333,9 @@ func (c *KoboldClient) MaxContextLength(ctx context.Context) (int, error) {
 // serve whatever weights they were started with. Worth recording next to
 // any measurement — a pass rate compared against one from a different
 // model, or the same model at a different quantization, is worse than no
-// number at all. Backends that don't expose this return an error and the
-// caller carries on without it.
-func (c *KoboldClient) ModelName(ctx context.Context) (string, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/api/v1/model", nil)
-	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
-	}
-
-	resp, err := c.http.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("call backend: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("backend returned %s", resp.Status)
-	}
-
-	var out struct {
-		Result string `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-	return out.Result, nil
+// number at all.
+func (c *Server) ModelName(ctx context.Context) (string, error) {
+	return c.dialect.modelName(ctx, c.http, c.baseURL)
 }
 
 // normalizeArguments handles the real shape of this wire format: per spec,

@@ -231,6 +231,8 @@ func main() {
 	requireModel := flag.String("require-model", "", "refuse to run unless the model the backend "+
 		"reports contains this substring — a local server loads whatever it was last started "+
 		"with, and comparing a score against one from different weights is worse than having no score")
+	backendKind := flag.String("backend-kind", "kobold", "which local server: kobold or llama "+
+		"(llama-server, worth running with --jinja for per-model tool-call formats)")
 	flag.Parse()
 
 	if *dry {
@@ -275,7 +277,7 @@ func main() {
 	// A pass rate without the model that produced it is worse than no
 	// number — comparing today's score against one from a different
 	// quantization is the exact mistake this tool exists to prevent.
-	probe := llm.NewKoboldClient(*backend, *model)
+	probe := newBackend(*backendKind, *backend, *model)
 	ctx := context.Background()
 	contextLimit, _ := probe.MaxContextLength(ctx)
 	backendModel, err := probe.ModelName(ctx)
@@ -290,14 +292,14 @@ func main() {
 		log.Fatalf("backend is serving %q, which does not contain %q — "+
 			"load the intended model or drop -require-model", backendModel, *requireModel)
 	}
-	fmt.Printf("backend %s\nmodel   %s\ncontext %d\n%d probes x %d runs\n\n",
-		*backend, backendModel, contextLimit, len(probes), *runs)
-	writeMeta(runDir, *backend, backendModel, contextLimit)
+	fmt.Printf("backend %s (%s)\nmodel   %s\ncontext %d\n%d probes x %d runs\n\n",
+		*backend, probe.Backend(), backendModel, contextLimit, len(probes), *runs)
+	writeMeta(runDir, probe.Backend(), *backend, backendModel, contextLimit)
 
 	var all []Result
 	for _, p := range probes {
 		for run := 1; run <= *runs; run++ {
-			r := runOnce(ctx, p, run, runDir, *backend, *model, contextLimit, *maxTokens, *dry_)
+			r := runOnce(ctx, p, run, runDir, *backendKind, *backend, *model, contextLimit, *maxTokens, *dry_)
 			all = append(all, r)
 
 			line, _ := json.Marshal(r)
@@ -328,6 +330,21 @@ func main() {
 // the caller receives: with an unnamed result, `return res` copies before
 // the defer runs and every duration is reported as zero.
 // keepTier filters by tier; an empty tier keeps everything.
+// newBackend picks a dialect. Unknown names fail loudly rather than
+// silently defaulting: a run against the wrong backend is the same class
+// of wasted measurement as a run against the wrong model.
+func newBackend(kind, baseURL, model string) *llm.Server {
+	switch kind {
+	case "kobold":
+		return llm.NewKoboldClient(baseURL, model)
+	case "llama":
+		return llm.NewLlamaClient(baseURL, model)
+	default:
+		log.Fatalf("unknown -backend-kind %q, want kobold or llama", kind)
+		return nil
+	}
+}
+
 func keepTier(probes []Probe, tier string) []Probe {
 	if tier == "" {
 		return probes
@@ -341,7 +358,7 @@ func keepTier(probes []Probe, tier string) []Probe {
 	return kept
 }
 
-func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model string,
+func runOnce(ctx context.Context, p Probe, run int, runDir, backendKind, backend, model string,
 	contextLimit, maxTokens int, drySampler bool) (res Result) {
 
 	res = Result{Probe: p.Name, Run: run}
@@ -368,7 +385,7 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 		return res
 	}
 
-	kobold := llm.NewKoboldClient(backend, model)
+	kobold := newBackend(backendKind, backend, model)
 	kobold.Grammar = llm.DefaultGrammar
 	kobold.DRY = drySampler
 	client := kobold
@@ -660,8 +677,9 @@ func summarize(all []Result) string {
 }
 
 // writeMeta records what produced these numbers, next to the numbers.
-func writeMeta(runDir, backend, model string, contextLimit int) {
+func writeMeta(runDir, kind, backend, model string, contextLimit int) {
 	meta := map[string]any{
+		"backend_kind":  kind,
 		"backend":       backend,
 		"model":         model,
 		"context_limit": contextLimit,

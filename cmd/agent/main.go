@@ -51,6 +51,8 @@ func main() {
 		"without it. Also auto-enabled when the task names ≥2 deliverable files (see -direct)")
 	direct := flag.Bool("direct", false, "force the reactive agent loop even when the task looks multi-file")
 	yes := flag.Bool("yes", false, "skip the mission plan approval gate and run the plan as generated")
+	backendKind := flag.String("backend-kind", "kobold", "which local server: kobold or llama "+
+		"(llama-server, worth running with --jinja for per-model tool-call formats)")
 	flag.Parse()
 
 	task := strings.Join(flag.Args(), " ")
@@ -102,7 +104,15 @@ func main() {
 		log.Fatalf("workspace: %v", err)
 	}
 
-	client := llm.NewKoboldClient(*backend, *model)
+	var client *llm.Server
+	switch *backendKind {
+	case "kobold":
+		client = llm.NewKoboldClient(*backend, *model)
+	case "llama":
+		client = llm.NewLlamaClient(*backend, *model)
+	default:
+		log.Fatalf("unknown -backend-kind %q, want kobold or llama", *backendKind)
+	}
 	if *grammar {
 		client.Grammar = llm.DefaultGrammar
 	}
