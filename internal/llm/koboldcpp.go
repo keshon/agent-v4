@@ -27,6 +27,10 @@ type KoboldClient struct {
 	// terminal.
 	Debug io.Writer
 
+	// DRY enables the DRY sampler on every request. Off by default; see
+	// the sampling defaults for why.
+	DRY bool
+
 	// Grammar, if set, is sent as a GBNF constraint on every response.
 	// koboldcpp already grammar-constrains the arguments of a tool call it
 	// decides to make; it does NOT constrain the plain-text path taken
@@ -73,11 +77,18 @@ rest ::= [^` + "\\x00" + `]*
 // a score measured under unknown sampling cannot be compared to the next
 // one. Values here are deliberate and measurable, not inherited.
 //
-// DRY exists because of an observed collapse: a run whose context filled
-// with high-entropy base64 degenerated into a single token repeated for
-// hundreds of lines, then lost the task entirely. DRY penalizes verbatim
-// repetition of sequences without the broad quality cost of a high
-// repetition penalty, which is why rep_pen stays mild beside it.
+// DRY is off by default, and that is a measured decision rather than a
+// preference. It was switched on to stop a collapse — a run whose context
+// filled with high-entropy base64 degenerated into one token repeated for
+// hundreds of lines — and the next baseline showed every probe that
+// patches a file getting slower and less reliable while every probe that
+// does not stayed byte-identical.
+//
+// The mechanism fits: DRY penalizes verbatim repetition of sequences, and
+// patch_file requires reproducing old_content exactly. Repetition is
+// degeneration in prose and correctness in code, so a sampler that cannot
+// tell them apart should not be on by default in a coding agent.
+// KoboldClient.DRY re-enables it for anyone who wants to re-test.
 const (
 	defaultTemperature = 0.4
 	defaultRepPen      = 1.05
@@ -185,9 +196,11 @@ func (c *KoboldClient) Chat(ctx context.Context, req ChatRequest) (ChatResponse,
 		Temperature: temperature,
 		RepPen:      defaultRepPen,
 		RepPenRange: defaultRepPenRange,
-		DRYMult:     defaultDRYMult,
-		DRYBase:     defaultDRYBase,
-		DRYAllowed:  defaultDRYAllowed,
+	}
+	if c.DRY {
+		wreq.DRYMult = defaultDRYMult
+		wreq.DRYBase = defaultDRYBase
+		wreq.DRYAllowed = defaultDRYAllowed
 	}
 
 	for _, m := range req.Messages {

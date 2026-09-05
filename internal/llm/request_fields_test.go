@@ -139,9 +139,29 @@ func TestChat_UnsetTemperatureBecomesAnExplicitDefault(t *testing.T) {
 	if !strings.Contains(string(captured), `"temperature":0.4`) {
 		t.Fatalf("expected an explicit temperature, got: %s", captured)
 	}
-	for _, field := range []string{`"rep_pen"`, `"dry_multiplier"`} {
-		if !strings.Contains(string(captured), field) {
-			t.Fatalf("expected %s to be sent, got: %s", field, captured)
-		}
+	if !strings.Contains(string(captured), `"rep_pen"`) {
+		t.Fatalf("expected rep_pen to be sent, got: %s", captured)
+	}
+	// DRY is opt-in: it penalizes verbatim repetition, and patch_file
+	// requires reproducing old_content exactly.
+	if strings.Contains(string(captured), `"dry_multiplier"`) {
+		t.Fatalf("DRY sent without being asked for, got: %s", captured)
+	}
+}
+
+func TestChat_DRYIsSentOnlyWhenEnabled(t *testing.T) {
+	var captured []byte
+	srv := captureServer(t, &captured)
+	defer srv.Close()
+
+	c := NewKoboldClient(srv.URL, "local")
+	c.DRY = true
+	if _, err := c.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(string(captured), `"dry_multiplier"`) {
+		t.Fatalf("DRY enabled but not sent, got: %s", captured)
 	}
 }

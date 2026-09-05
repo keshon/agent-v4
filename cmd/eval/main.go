@@ -188,6 +188,9 @@ func main() {
 	maxTokens := flag.Int("max-tokens", 8192, "generation budget per response")
 	dry := flag.Bool("dry", false, "load and validate every probe, then exit — checking a probe "+
 		"should not cost a model round-trip")
+	dry_ := flag.Bool("dry-sampler", false, "enable the DRY sampler — off by default because it "+
+		"penalizes verbatim repetition, which patch_file requires. Here so the choice can be measured "+
+		"rather than argued")
 	requireModel := flag.String("require-model", "", "refuse to run unless the model the backend "+
 		"reports contains this substring — a local server loads whatever it was last started "+
 		"with, and comparing a score against one from different weights is worse than having no score")
@@ -256,7 +259,7 @@ func main() {
 	var all []Result
 	for _, p := range probes {
 		for run := 1; run <= *runs; run++ {
-			r := runOnce(ctx, p, run, runDir, *backend, *model, contextLimit, *maxTokens)
+			r := runOnce(ctx, p, run, runDir, *backend, *model, contextLimit, *maxTokens, *dry_)
 			all = append(all, r)
 
 			line, _ := json.Marshal(r)
@@ -286,7 +289,7 @@ func main() {
 // the caller receives: with an unnamed result, `return res` copies before
 // the defer runs and every duration is reported as zero.
 func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model string,
-	contextLimit, maxTokens int) (res Result) {
+	contextLimit, maxTokens int, drySampler bool) (res Result) {
 
 	res = Result{Probe: p.Name, Run: run}
 	started := time.Now()
@@ -314,6 +317,7 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 
 	kobold := llm.NewKoboldClient(backend, model)
 	kobold.Grammar = llm.DefaultGrammar
+	kobold.DRY = drySampler
 	client := kobold
 
 	// Every model call, verbatim. When a probe regresses this is the only
