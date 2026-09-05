@@ -42,6 +42,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/keshon/tars/internal/llm"
@@ -133,6 +134,25 @@ type call struct {
 	tool string
 	args string
 }
+
+// countingClient records how many times the backend was actually reached.
+//
+// Step counts cannot answer that question: they come from OnStep, which
+// only fires for agent and worker steps, so a mission that dies during
+// planning reports zero steps having made two model calls. Scoring that
+// as "never ran" excludes a real failure from the rate — the inversion of
+// the bug the Errored flag exists to prevent.
+type countingClient struct {
+	inner llm.Client
+	calls int64
+}
+
+func (c *countingClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	atomic.AddInt64(&c.calls, 1)
+	return c.inner.Chat(ctx, req)
+}
+
+func (c *countingClient) reached() bool { return atomic.LoadInt64(&c.calls) > 0 }
 
 type Result struct {
 	Probe   string  `json:"probe"`
@@ -292,8 +312,9 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 		return res
 	}
 
-	client := llm.NewKoboldClient(backend, model)
-	client.Grammar = llm.DefaultGrammar
+	kobold := llm.NewKoboldClient(backend, model)
+	kobold.Grammar = llm.DefaultGrammar
+	client := kobold
 
 	// Every model call, verbatim. When a probe regresses this is the only
 	// thing that says why — reading traces is how the three harness bugs
@@ -301,9 +322,11 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 	tracePath := filepath.Join(runDir, fmt.Sprintf("%s-run%d.log", p.Name, run))
 	if tf, err := os.Create(tracePath); err == nil {
 		defer tf.Close()
-		client.Debug = tf
+		kobold.Debug = tf
 		res.Trace = tracePath
 	}
+
+	counter := &countingClient{inner: client}
 
 	timeout := time.Duration(p.TimeoutSec) * time.Second
 	if timeout <= 0 {
@@ -331,7 +354,7 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 	var answer string
 	if p.Mission {
 		runner := &mission.Runner{
-			Client:       client,
+			Client:       counter,
 			WS:           ws,
 			Dir:          filepath.Join(work, ".agent", "eval"),
 			Procs:        procs,
@@ -363,7 +386,7 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 		// and inventing an answer would make the probe score the answer.
 		// Whether ask_user was called at all stays visible in the trace,
 		// which is what probe 12 measures.
-		env := evalEnv(client, ws, procs, contextLimit, maxTokens, record)
+		env := evalEnv(counter, ws, procs, contextLimit, maxTokens, record)
 		a := roles.Interactive(env, "", "", func(string) (string, error) {
 			return "This is an automated evaluation run; no human is available. " +
 				"State your assumption and proceed with the smallest reasonable action.", nil
@@ -375,10 +398,10 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 		}
 	}
 
-	// Zero steps with an error means no model response ever arrived, so
-	// the workspace checks below would only be measuring the seed. Report
-	// it as an error rather than scoring it.
-	if res.Steps == 0 && res.RunError != "" {
+	// The backend was never reached, so the workspace checks below would
+	// only be measuring the seed. Report it as an error rather than
+	// scoring it.
+	if !counter.reached() && res.RunError != "" {
 		res.Errored = true
 		return res
 	}
