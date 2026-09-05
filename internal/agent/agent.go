@@ -108,9 +108,24 @@ type Config struct {
 	Verify func(ctx context.Context) (output string, ok bool)
 
 	// CompactKeepSteps is how many recent assistant-led step groups to
-	// retain when history is mechanically compacted at 90% context usage.
-	// Defaults to 8 in New. Set to -1 to disable compaction.
+	// retain when history is mechanically compacted. Defaults to 8 in New.
+	// Set to -1 to disable compaction.
 	CompactKeepSteps int
+
+	// CompactAtPercent is the share of ContextLimit at which history is
+	// compacted. Defaults to defaultCompactAtPercent.
+	//
+	// The window is not the model's working range. A local model holds a
+	// plan across far less context than it will accept, so compacting at
+	// the point where the window is nearly full means every step between
+	// "degraded" and "full" already ran degraded. Live: a run reached
+	// 57k of a 65k window, collapsed into a single repeated token, and
+	// then described the truncation notice as though it were the task.
+	//
+	// The right value is a property of the model, not of this code, which
+	// is why it is configuration with a documented default rather than a
+	// constant chosen once and hidden.
+	CompactAtPercent int
 }
 
 type Agent struct {
@@ -186,6 +201,9 @@ func New(cfg Config) *Agent {
 	}
 	if cfg.CompactKeepSteps == 0 {
 		cfg.CompactKeepSteps = 8
+	}
+	if cfg.CompactAtPercent == 0 {
+		cfg.CompactAtPercent = defaultCompactAtPercent
 	}
 	return &Agent{cfg: cfg}
 }
@@ -281,12 +299,12 @@ func (a *Agent) saveState(history []llm.Message) {
 }
 
 type runState struct {
-	stuckSteps, exploratorySteps, mutatingSucceeded, warnedThreshold, lastPromptTokens       int
-	consecutiveSameToolCount                                                                 int
-	verifiedOnce, searchFatigueWarned, compactedOnce, blockFinishDueToVerify, toolLoopWarned bool
-	emptyFinishRetried                                                                       bool
-	lastSignature, verifyFailedOutput, lastSingleTool                                        string
-	mutatedPaths                                                                             []string
+	stuckSteps, exploratorySteps, mutatingSucceeded, warnedThreshold, lastPromptTokens int
+	consecutiveSameToolCount                                                           int
+	verifiedOnce, searchFatigueWarned, blockFinishDueToVerify, toolLoopWarned          bool
+	emptyFinishRetried                                                                 bool
+	lastSignature, verifyFailedOutput, lastSingleTool                                  string
+	mutatedPaths                                                                       []string
 
 	// zeroWriteFinishes counts how many times the model has tried to end
 	// the run having written nothing, while VerifyOnZeroWrites says the
@@ -754,19 +772,33 @@ func parseDelegateMutations(content string) int {
 	return 0
 }
 
+// defaultCompactAtPercent is the share of the context window at which
+// history is compacted. Well below the old 90%: a window is what the
+// backend will accept, not what the model can still reason over, and the
+// steps taken between those two points are the ones that produce
+// confidently wrong work.
+const defaultCompactAtPercent = 60
+
+// maybeCompact drops old step groups once the prompt passes the
+// threshold, and may do so more than once in a run — a long run that
+// compacted at step 12 and then grew again is in exactly the state
+// compaction exists for.
+//
+// compactHistory returns its input unchanged when there is nothing left
+// to drop, which is what stops a full history from being compacted every
+// step to no effect.
 func (a *Agent) maybeCompact(history *[]llm.Message, usage llm.Usage, st *runState) bool {
-	if st.compactedOnce || a.cfg.ContextLimit <= 0 || a.cfg.CompactKeepSteps <= 0 {
+	if a.cfg.ContextLimit <= 0 || a.cfg.CompactKeepSteps <= 0 || usage.PromptTokens <= 0 {
 		return false
 	}
-	if usage.PromptTokens <= 0 {
+	if usage.PromptTokens*100/a.cfg.ContextLimit < a.cfg.CompactAtPercent {
 		return false
 	}
-	pct := usage.PromptTokens * 100 / a.cfg.ContextLimit
-	if pct < 90 {
+	compacted := compactHistory(*history, a.cfg.CompactKeepSteps)
+	if len(compacted) >= len(*history) {
 		return false
 	}
-	*history = compactHistory(*history, a.cfg.CompactKeepSteps)
-	st.compactedOnce = true
+	*history = compacted
 	return true
 }
 

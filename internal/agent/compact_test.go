@@ -85,3 +85,81 @@ func TestStepGroups_SplitsOnAssistant(t *testing.T) {
 		t.Fatalf("unexpected group sizes: %d, %d", len(groups[0]), len(groups[1]))
 	}
 }
+
+// history builds a transcript with n assistant-led step groups after the
+// system/user prefix, which is the shape compactHistory splits on.
+func historyWithSteps(n int) []llm.Message {
+	out := []llm.Message{
+		{Role: llm.RoleSystem, Content: "sys"},
+		{Role: llm.RoleUser, Content: "task"},
+	}
+	for i := 0; i < n; i++ {
+		out = append(out,
+			llm.Message{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "c", Name: "read_file"}}},
+			llm.Message{Role: llm.RoleTool, ToolCallID: "c", Content: "contents"},
+		)
+	}
+	return out
+}
+
+func compactAgent(t *testing.T, atPercent int) *Agent {
+	t.Helper()
+	return New(Config{
+		Client: &stubClient{}, Tools: NewRegistry(), System: "sys",
+		ContextLimit: 1000, CompactKeepSteps: 2, CompactAtPercent: atPercent,
+	})
+}
+
+func TestMaybeCompact_LeavesHistoryAloneBelowThreshold(t *testing.T) {
+	a := compactAgent(t, 60)
+	h := historyWithSteps(10)
+	before := len(h)
+	if a.maybeCompact(&h, llm.Usage{PromptTokens: 500}, &runState{}) {
+		t.Error("compacted at 50% with a 60% threshold")
+	}
+	if len(h) != before {
+		t.Errorf("history changed anyway: %d -> %d", before, len(h))
+	}
+}
+
+func TestMaybeCompact_FiresAtTheThreshold(t *testing.T) {
+	a := compactAgent(t, 60)
+	h := historyWithSteps(10)
+	before := len(h)
+	if !a.maybeCompact(&h, llm.Usage{PromptTokens: 600}, &runState{}) {
+		t.Fatal("did not compact at the threshold")
+	}
+	if len(h) >= before {
+		t.Errorf("history not reduced: %d -> %d", before, len(h))
+	}
+}
+
+// A long run that compacted once and then grew again is in exactly the
+// state compaction exists for. The old implementation compacted at most
+// once per run and left everything after that unprotected.
+func TestMaybeCompact_CompactsAgainAfterHistoryGrows(t *testing.T) {
+	a := compactAgent(t, 60)
+	st := &runState{}
+	h := historyWithSteps(10)
+	if !a.maybeCompact(&h, llm.Usage{PromptTokens: 700}, st) {
+		t.Fatal("first compaction did not fire")
+	}
+	h = append(h, historyWithSteps(10)[2:]...) // the run keeps going
+	if !a.maybeCompact(&h, llm.Usage{PromptTokens: 700}, st) {
+		t.Fatal("second compaction did not fire — a long run stays unprotected")
+	}
+}
+
+// Compacting an already-minimal history every step would spend work and
+// drop nothing.
+func TestMaybeCompact_StopsWhenThereIsNothingLeftToDrop(t *testing.T) {
+	a := compactAgent(t, 60)
+	st := &runState{}
+	h := historyWithSteps(10)
+	if !a.maybeCompact(&h, llm.Usage{PromptTokens: 900}, st) {
+		t.Fatal("first compaction did not fire")
+	}
+	if a.maybeCompact(&h, llm.Usage{PromptTokens: 900}, st) {
+		t.Error("compacted again with nothing left to drop")
+	}
+}
