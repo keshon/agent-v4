@@ -385,7 +385,13 @@ func main() {
 		fmt.Println()
 	}
 
+	// Announce a probe before running it. A mission probe can take fifteen
+	// minutes, and printing only on completion means a working run looks
+	// identical to a hung one — results.jsonl stays empty either way.
 	run1 := func(j job) {
+		mu.Lock()
+		fmt.Printf("  ....  %-22s run %d  started\n", j.probe.Name, j.run)
+		mu.Unlock()
 		record(runOnce(ctx, j.probe, j.run, runDir, *backendKind, *backend, *model,
 			contextLimit, *maxTokens, *dry_))
 	}
