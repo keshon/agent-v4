@@ -67,11 +67,37 @@ func (t RunShell) Run(ctx context.Context, args json.RawMessage) (string, error)
 	cmd.Stderr = &out
 
 	err := cmd.Run()
-	result := out.String()
+	result := capShellOutput(out.String())
 	if err != nil {
 		return result, fmt.Errorf("command failed: %w", err)
 	}
 	return result, nil
+}
+
+// shellMaxBytes caps one run_shell result, matching the read_file cap for
+// the same reason: no single tool result may consume most of a small
+// context window.
+//
+// This was the last uncapped way into the context, and capping the others
+// is what found it. read_file truncates and grep_files caps its matches,
+// so a model denied a large read reaches for the shell instead: live, a
+// probe that reads a 205KB fixture ran "type big.txt", put the whole file
+// in the prompt, and drove a 3.4k prompt to 57k in one step. The read cap
+// had been tightened an hour earlier and was simply not in the path.
+//
+// Middle-truncated rather than head-truncated: a command's first lines
+// carry what it is doing and its last lines carry how it failed, and the
+// failure is usually the point.
+const shellMaxBytes = 48 * 1024
+
+func capShellOutput(s string) string {
+	if len(s) <= shellMaxBytes {
+		return s
+	}
+	return agent.TruncateMiddle(s, shellMaxBytes) +
+		fmt.Sprintf("\n\n(output truncated: %d bytes total. Re-run narrowed — a pipe through "+
+			"findstr/grep, a smaller path, or head/tail — rather than asking for all of it again.)",
+			len(s))
 }
 
 // shellCommand picks a shell that actually understands the commands a

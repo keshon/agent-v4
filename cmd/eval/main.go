@@ -145,11 +145,25 @@ type call struct {
 type countingClient struct {
 	inner llm.Client
 	calls int64
+
+	// peakPrompt is the largest prompt any call sent, across every agent
+	// and worker in the run. It is the one number that says whether a
+	// result is about the model or about the context filling up, and
+	// without it that question costs a trawl through the raw trace.
+	peakPrompt int64
 }
 
 func (c *countingClient) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	atomic.AddInt64(&c.calls, 1)
-	return c.inner.Chat(ctx, req)
+	resp, err := c.inner.Chat(ctx, req)
+	for {
+		got := int64(resp.Usage.PromptTokens)
+		peak := atomic.LoadInt64(&c.peakPrompt)
+		if got <= peak || atomic.CompareAndSwapInt64(&c.peakPrompt, peak, got) {
+			break
+		}
+	}
+	return resp, err
 }
 
 func (c *countingClient) reached() bool { return atomic.LoadInt64(&c.calls) > 0 }
@@ -169,6 +183,16 @@ type Result struct {
 	// failed" from "nothing ran" is the same disease as a model grading
 	// its own work.
 	Errored bool `json:"errored,omitempty"`
+
+	// PeakPromptTokens is the largest prompt sent during the run, and
+	// PeakContextPct that as a share of the window. A probe that failed at
+	// 90% is a context story; the same failure at 5% is not.
+	PeakPromptTokens int `json:"peak_prompt_tokens,omitempty"`
+	PeakContextPct   int `json:"peak_context_pct,omitempty"`
+
+	// Tools counts calls by name — the shape of a run in one line,
+	// without opening the trace.
+	Tools map[string]int `json:"tools,omitempty"`
 
 	RunError string   `json:"run_error,omitempty"`
 	Failures []string `json:"failures,omitempty"`
@@ -272,7 +296,8 @@ func main() {
 			case !r.Passed:
 				status = "FAIL"
 			}
-			fmt.Printf("  %s  %-22s run %d  %6.1fs  %2d steps", status, p.Name, run, r.Seconds, r.Steps)
+			fmt.Printf("  %s  %-22s run %d  %6.1fs  %2d steps  ctx %2d%%",
+				status, p.Name, run, r.Seconds, r.Steps, r.PeakContextPct)
 			if len(r.Failures) > 0 {
 				fmt.Printf("  %s", r.Failures[0])
 			} else if r.RunError != "" {
@@ -422,6 +447,17 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 	res.Failures = append(res.Failures, checkWorkspace(runCtx, p, ws)...)
 	res.Failures = append(res.Failures, checkTrace(p, calls)...)
 	res.Failures = append(res.Failures, checkAnswer(p, answer)...)
+
+	res.PeakPromptTokens = int(atomic.LoadInt64(&counter.peakPrompt))
+	if contextLimit > 0 {
+		res.PeakContextPct = res.PeakPromptTokens * 100 / contextLimit
+	}
+	if len(calls) > 0 {
+		res.Tools = map[string]int{}
+		for _, c := range calls {
+			res.Tools[c.tool]++
+		}
+	}
 	if p.MaxSteps > 0 && res.Steps > p.MaxSteps {
 		res.Failures = append(res.Failures,
 			fmt.Sprintf("took %d steps, probe allows %d", res.Steps, p.MaxSteps))
