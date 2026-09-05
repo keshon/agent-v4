@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 func testWS(t *testing.T) *workspace.Workspace {

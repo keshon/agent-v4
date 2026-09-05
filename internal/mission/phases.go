@@ -10,12 +10,12 @@ import (
 	"sort"
 	"strings"
 
-	"tars/internal/agent"
-	"tars/internal/llm"
-	"tars/internal/prompts"
-	"tars/internal/roles"
-	"tars/internal/tools"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
+	"github.com/keshon/tars/internal/roles"
+	"github.com/keshon/tars/internal/tools"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // Runner drives a mission through its phases deterministically. The

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 func TestPatchFile_ReplacesUniqueOccurrence(t *testing.T) {

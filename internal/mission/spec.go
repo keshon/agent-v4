@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // SpecBrief inlines short text specs (PLAN.md etc.) into the planning

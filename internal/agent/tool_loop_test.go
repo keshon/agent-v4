@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"tars/internal/llm"
-	"tars/internal/prompts"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
 )
 
 func readStep(id, path string) llm.ChatResponse {

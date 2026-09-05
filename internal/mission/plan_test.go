@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"tars/internal/llm"
+	"github.com/keshon/tars/internal/llm"
 )
 
 type scriptClient struct {

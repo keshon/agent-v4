@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // checkShellTimeout bounds a shell check the same way tools.RunShell

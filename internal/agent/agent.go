@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync"
 
-	"tars/internal/llm"
-	"tars/internal/prompts"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
 )
 
 // Config wires together everything an Agent needs. There is exactly one

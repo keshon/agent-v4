@@ -22,11 +22,11 @@ import (
 	"context"
 	"path/filepath"
 
-	"tars/internal/agent"
-	"tars/internal/llm"
-	"tars/internal/prompts"
-	"tars/internal/tools"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
+	"github.com/keshon/tars/internal/tools"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 const (

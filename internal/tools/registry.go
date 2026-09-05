@@ -1,8 +1,8 @@
 package tools
 
 import (
-	"tars/internal/agent"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // Base returns the standard tool set shared by the main agent and

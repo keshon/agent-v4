@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"tars/internal/llm"
+	"github.com/keshon/tars/internal/llm"
 )
 
 func say(text string) llm.ChatResponse {

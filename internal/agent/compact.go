@@ -1,8 +1,8 @@
 package agent
 
 import (
-	"tars/internal/llm"
-	"tars/internal/prompts"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
 )
 
 // compactHistory drops older assistant-led step groups from history while

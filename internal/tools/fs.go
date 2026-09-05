@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"tars/internal/agent"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 const readMaxBytes = 128 * 1024 // cap one read_file result — mirrors grep_files safety nets

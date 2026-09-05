@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"tars/internal/agent"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // MoveFile renames or moves a file in one atomic step. It exists

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"tars/internal/llm"
+	"github.com/keshon/tars/internal/llm"
 )
 
 // mutStub stands in for any of the project's mutating file tools — the

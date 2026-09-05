@@ -9,3 +9,4 @@ agent-frontend.log
 agent-backend.log
 plan.md
 eval/results/
+eval/log/

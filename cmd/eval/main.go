@@ -44,11 +44,11 @@ import (
 	"strings"
 	"time"
 
-	"tars/internal/llm"
-	"tars/internal/mission"
-	"tars/internal/roles"
-	"tars/internal/tools"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/mission"
+	"github.com/keshon/tars/internal/roles"
+	"github.com/keshon/tars/internal/tools"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // Probe is one frozen scenario. It pairs with a human-readable write-up in

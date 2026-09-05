@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"tars/internal/agent"
+	"github.com/keshon/tars/internal/agent"
 )
 
 const checkURLBodyMax = 512

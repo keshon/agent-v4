@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"tars/internal/agent"
-	"tars/internal/llm"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/llm"
 )
 
 // stubSubClient returns a fixed answer with no tool calls, so spawned

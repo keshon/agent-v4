@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"tars/internal/agent"
+	"github.com/keshon/tars/internal/agent"
 )
 
 // Delegate lets an agent hand off a self-contained subtask to a fresh

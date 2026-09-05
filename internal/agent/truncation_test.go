@@ -6,8 +6,8 @@ import (
 	"errors"
 	"testing"
 
-	"tars/internal/llm"
-	"tars/internal/prompts"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
 )
 
 // Live failure shape (Qwen3.6 run, 2026-07-11): the backend cut generation

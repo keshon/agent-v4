@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"tars/internal/llm"
+	"github.com/keshon/tars/internal/llm"
 )
 
 // readStub is an idempotent (pure-read) tool that counts executions.

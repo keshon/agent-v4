@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"sort"
 
-	"tars/internal/llm"
+	"github.com/keshon/tars/internal/llm"
 )
 
 // ToolMode tells the loop whether a tool is safe to run concurrently with

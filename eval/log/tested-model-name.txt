@@ -1,1 +1,0 @@
-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf with koboldcpp backend

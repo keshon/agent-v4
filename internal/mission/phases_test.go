@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"tars/internal/agent"
-	"tars/internal/llm"
-	"tars/internal/tools"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/tools"
 )
 
 // runnerClient scripts full ChatResponses (tool calls included) for

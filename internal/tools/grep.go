@@ -12,8 +12,8 @@ import (
 	"regexp"
 	"strings"
 
-	"tars/internal/agent"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // GrepFiles searches file contents by regex instead of requiring read_file

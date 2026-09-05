@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"tars/internal/llm"
+	"github.com/keshon/tars/internal/llm"
 )
 
 // errStub always fails, so every step it appears in is unproductive.

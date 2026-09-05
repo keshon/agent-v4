@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"tars/internal/agent"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // PatchLines replaces lines [start_line, end_line] (1-indexed, inclusive)

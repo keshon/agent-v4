@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 func TestBackgroundProcesses_StartCheckStop(t *testing.T) {

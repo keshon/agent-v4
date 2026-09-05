@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"tars/internal/agent"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/agent"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // StartBackground launches a long-running command (dev server, watcher)

@@ -3,8 +3,8 @@ package agent
 import (
 	"testing"
 
-	"tars/internal/llm"
-	"tars/internal/prompts"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
 )
 
 func assistantStep(id string) []llm.Message {

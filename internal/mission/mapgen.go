@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // Map generation is mechanical on purpose: a walk over the workspace

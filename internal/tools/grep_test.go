@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 func TestGrepFiles_FindsMatchesAcrossFiles(t *testing.T) {

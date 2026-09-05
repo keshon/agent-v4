@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"tars/internal/prompts"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/prompts"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 // Context budget knobs. Sizes are characters (≈ tokens*4); the whole

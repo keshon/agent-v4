@@ -5,9 +5,9 @@ import (
 	"slices"
 	"testing"
 
-	"tars/internal/llm"
-	"tars/internal/tools"
-	"tars/internal/workspace"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/tools"
+	"github.com/keshon/tars/internal/workspace"
 )
 
 type stubClient struct{}

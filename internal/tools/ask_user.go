@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"tars/internal/agent"
+	"github.com/keshon/tars/internal/agent"
 )
 
 // AskUser blocks until the user supplies an answer via AskFn, which the

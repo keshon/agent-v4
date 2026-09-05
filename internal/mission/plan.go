@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"tars/internal/llm"
-	"tars/internal/prompts"
+	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
 )
 
 // planTemperature is deliberately low: structured output wants stability,
