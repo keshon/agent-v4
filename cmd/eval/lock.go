@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -26,6 +28,28 @@ const staleLockAfter = 3 * time.Hour
 // Correctness survives contention; wall time does not. The lock is
 // advisory and -force overrides it, because sometimes two runs against
 // different backends genuinely are fine.
+// holderAlive reports whether the process named in a lock file is still
+// running. An unreadable or malformed lock is treated as held, since
+// guessing wrong in that direction only costs a wait.
+func holderAlive(stamp string) bool {
+	var pid int
+	if _, err := fmt.Sscanf(strings.TrimSpace(stamp), "pid %d", &pid); err != nil || pid <= 0 {
+		return true
+	}
+	if pid == os.Getpid() {
+		return true
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false // Windows: FindProcess opens the process, so this means gone
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	// Unix: FindProcess always succeeds, so probe with signal 0.
+	return p.Signal(syscall.Signal(0)) == nil
+}
+
 func takeLock(outDir string, force bool) (release func(), err error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, err
@@ -34,8 +58,15 @@ func takeLock(outDir string, force bool) (release func(), err error) {
 
 	if info, statErr := os.Stat(path); statErr == nil {
 		age := time.Since(info.ModTime())
+		owner, _ := os.ReadFile(path)
+		// A killed run never releases its lock, and waiting out the
+		// staleness window for a process that is already gone is a worse
+		// failure than the contention this guards against. The lock
+		// records a pid; ask whether it is still there.
+		if !holderAlive(string(owner)) {
+			age = staleLockAfter
+		}
 		if age < staleLockAfter && !force {
-			owner, _ := os.ReadFile(path)
 			return nil, fmt.Errorf(
 				"another eval has been running for %s and shares this backend:\n  %s\n"+
 					"Timings measured across two runs record contention, not the agent. "+
