@@ -298,6 +298,14 @@ type runState struct {
 	// free. See interject.
 	pendingBudget string
 
+	// failedCalls counts consecutive identical failures per call, cleared
+	// on success or on any workspace mutation. See maxIdenticalAttempts.
+	failedCalls map[string]int
+
+	// stuckNudges counts how many times this run has been told it is
+	// stuck, so the wording can escalate instead of repeating.
+	stuckNudges int
+
 	// idempotentSeen maps signature (name+args) of successful idempotent
 	// calls to the step that ran them; cleared whenever anything mutates
 	// the workspace. Exact repeats short-circuit to an error result — a
@@ -508,10 +516,33 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 					}
 				}
 			}
+			// A call that already failed, repeated identically with nothing
+			// mutated since, fails identically again. Soft nudges do not
+			// stop this: run_shell already returns an error on a non-zero
+			// exit, so the stuck counter was climbing and escalating the
+			// whole time a live worker ran `go test <one _test.go file>`
+			// seven times. It ignored every nudge. A refusal is not
+			// ignorable.
+			//
+			// The tolerance exists because a few tools are legitimately
+			// time-dependent — check_url against a server that is still
+			// starting is the honest case, and start_background is
+			// Concurrent so it does not clear this cache.
+			key := callKey(call.Name, call.Arguments)
+			if n := st.failedCalls[key]; n >= maxIdenticalAttempts-1 {
+				skipped[i] = true
+				results[i] = callResult{err: fmt.Errorf(
+					"this exact %s call has already failed %d times and nothing in the workspace "+
+						"has changed since — it will fail the same way again. Read the error above "+
+						"and fix the cause, or take a different approach; do not re-run it",
+					call.Name, n)}
+				continue
+			}
+
 			if !a.cfg.Tools.IdempotentOf(call.Name) {
 				continue
 			}
-			sig := callKey(call.Name, call.Arguments)
+			sig := key
 			if prev, seen := st.idempotentSeen[sig]; seen {
 				skipped[i] = true
 				results[i] = callResult{err: fmt.Errorf(
@@ -563,8 +594,18 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			content := results[i].content
 			if results[i].err != nil {
 				content = "error: " + results[i].err.Error()
+				if !skipped[i] {
+					// Skipped calls are already refusals; counting them
+					// would let the counter climb without the model ever
+					// having re-attempted anything.
+					if st.failedCalls == nil {
+						st.failedCalls = make(map[string]int)
+					}
+					st.failedCalls[callKey(call.Name, call.Arguments)]++
+				}
 			} else {
 				progressed = true
+				delete(st.failedCalls, callKey(call.Name, call.Arguments))
 				if a.cfg.Tools.ModeOf(call.Name) == Exclusive {
 					exclusiveSucceeded = true
 				}
@@ -608,6 +649,9 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 		// same read can now legitimately return something new.
 		if exclusiveSucceeded || st.mutatingSucceeded > mutatingBefore {
 			st.idempotentSeen = nil
+			// The same reasoning: once the workspace changed, a call that
+			// failed before may now succeed.
+			st.failedCalls = nil
 		}
 
 		// A step that changed the workspace is progress by definition, so
@@ -734,6 +778,14 @@ func (a *Agent) maybeCompact(history *[]llm.Message, usage llm.Usage, st *runSta
 // tool alone trip the tool-loop nudge.
 const maxSameToolSteps = 3
 
+// maxIdenticalAttempts is how many identical attempts at a call are
+// allowed while it keeps failing and nothing mutates in between: the
+// call executes twice and the third attempt is refused without running.
+// Above two so a genuinely time-dependent retry has room — polling a
+// server that is still starting is the honest case, and start_background
+// is Concurrent so it does not clear this cache.
+const maxIdenticalAttempts = 3
+
 // stepOutcome carries the parts of a completed step that interject can't
 // read off runState.
 type stepOutcome struct {
@@ -770,12 +822,27 @@ func (a *Agent) interject(st *runState, o stepOutcome) string {
 	switch {
 	case st.stuckSteps >= a.cfg.MaxStuckSteps:
 		// Hardest signal: nothing has worked for MaxStuckSteps running.
+		//
+		// This has no latch, unlike the nudges below, because being stuck
+		// can recur for a new reason. What it must not do is say the same
+		// thing twice: a live worker received the identical StuckFailing
+		// text four times in one run and ignored all four. After the
+		// first, the wording escalates; after the second, the loop stops
+		// talking and lets the step budget end the run, because a third
+		// copy of advice already refused twice is only context.
 		st.stuckSteps = 0
 		st.lastSignature = "" // the nudge itself breaks the repeat chain
-		if o.repeat {
+		st.stuckNudges++
+		switch {
+		case st.stuckNudges == 1 && o.repeat:
 			return prompts.StuckRepeating
+		case st.stuckNudges == 1:
+			return prompts.StuckFailing
+		case st.stuckNudges == 2:
+			return prompts.StuckEscalated
+		default:
+			return ""
 		}
-		return prompts.StuckFailing
 
 	case st.consecutiveSameToolCount >= maxSameToolSteps && !st.toolLoopWarned:
 		st.toolLoopWarned = true

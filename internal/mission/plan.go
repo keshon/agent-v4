@@ -281,10 +281,15 @@ func validateCheck(s *Subtask, existing map[string]bool) (errs []string) {
 		}
 	case "shell":
 		cmd := strings.TrimSpace(strings.ToLower(c.Cmd))
-		if cmd == "" {
+		switch {
+		case cmd == "":
 			errs = append(errs, fmt.Sprintf("%s: shell check has no cmd", s.ID))
-		} else if vacuousShellCheck(cmd) {
+		case vacuousShellCheck(cmd):
 			errs = append(errs, fmt.Sprintf("%s: shell check %q always succeeds and verifies nothing", s.ID, c.Cmd))
+		default:
+			if reason := unsatisfiableShellCheck(cmd); reason != "" {
+				errs = append(errs, fmt.Sprintf("%s: shell check %q %s", s.ID, c.Cmd, reason))
+			}
 		}
 	case "http":
 		if !strings.HasPrefix(c.URL, "http://") && !strings.HasPrefix(c.URL, "https://") {
@@ -334,6 +339,39 @@ func isDirOf(existing map[string]bool, path string) bool {
 // the first word (lowercased): a real weak-model plan produced `ls -l` as
 // a "check" and it passed vacuously, so this is a live failure shape, not
 // paranoia.
+// unsatisfiableShellCheck flags commands that fail regardless of whether
+// the work was done, returning why. The opposite hazard to
+// vacuousShellCheck and the more expensive one: a check that can never
+// pass turns every fix attempt into a guessing game about the command
+// rather than the code, and the fix loop spends its whole budget there.
+//
+// A live plan checked `go test ./internal/tools/parseurl_test.go`. A
+// single _test.go file cannot be compiled alone when it depends on the
+// package around it, so the check failed on correct code; three fix
+// workers and a replan were spent re-running variants of the command.
+func unsatisfiableShellCheck(cmd string) string {
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 || fields[0] != "go" {
+		return ""
+	}
+	switch fields[1] {
+	case "test", "build", "vet", "run":
+	default:
+		return ""
+	}
+	for _, arg := range fields[2:] {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if strings.HasSuffix(arg, "_test.go") {
+			return "can never pass — a _test.go file cannot be compiled on its own " +
+				"when it uses the package around it. Name the package instead, " +
+				"e.g. `go test ./internal/tools/`"
+		}
+	}
+	return ""
+}
+
 func vacuousShellCheck(cmd string) bool {
 	first := cmd
 	if i := strings.IndexAny(first, " \t"); i >= 0 {

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/keshon/tars/internal/llm"
+	"github.com/keshon/tars/internal/prompts"
 )
 
 // errStub always fails, so every step it appears in is unproductive.
@@ -55,5 +56,34 @@ func TestAgent_Interject_AtMostOneMessagePerStep(t *testing.T) {
 				client.lastHistory[i-1].Content, m.Content)
 		}
 		prevWasInjected = injected
+	}
+}
+
+// A live worker received the identical StuckFailing text four times in
+// one run and ignored all four. Repeating advice a model has already
+// refused is context spent teaching it the message means nothing.
+func TestAgent_StuckNudge_EscalatesThenStopsRepeating(t *testing.T) {
+	client := &stubClient{responses: []llm.ChatResponse{
+		failStep("1", "a.go"), failStep("2", "b.go"), failStep("3", "c.go"),
+		failStep("4", "d.go"), failStep("5", "e.go"), failStep("6", "f.go"),
+		failStep("7", "g.go"), failStep("8", "h.go"), failStep("9", "i.go"),
+		say("giving up"),
+	}}
+	a := New(Config{
+		Client: client, Tools: NewRegistry(errStub{"flaky"}), System: "sys",
+		SkipVerify: true, MaxStuckSteps: 2, MaxExploratorySteps: 99,
+	})
+
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	first := countInjected(client.lastHistory, prompts.StuckFailing)
+	escalated := countInjected(client.lastHistory, prompts.StuckEscalated)
+	if first != 1 {
+		t.Errorf("StuckFailing delivered %d times, want exactly 1", first)
+	}
+	if escalated != 1 {
+		t.Errorf("StuckEscalated delivered %d times, want exactly 1", escalated)
 	}
 }

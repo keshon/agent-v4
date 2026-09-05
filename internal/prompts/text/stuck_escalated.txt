@@ -1,0 +1,3 @@
+The previous instruction did not change what you did. Repeating the same approach again will not work either.
+
+State in one sentence what is actually blocking you. Then either take a genuinely different approach, or stop and report the blocker as your answer. Do not re-issue the call you just made.

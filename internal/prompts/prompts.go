@@ -74,6 +74,12 @@ var (
 	// MaxStuckSteps steps in a row, regardless of success/failure.
 	StuckRepeating = read("stuck_repeating.txt")
 
+	// StuckEscalated replaces StuckFailing/StuckRepeating the second time
+	// a run gets stuck. Sending the same words again to a model that
+	// already ignored them once is context spent teaching it that the
+	// message means nothing; escalation has to change kind, not volume.
+	StuckEscalated = read("stuck_escalated.txt")
+
 	// BudgetWarning fires once when context usage crosses 90%. Three
 	// placeholders: tokens used, limit, percent.
 	BudgetWarning = read("budget_warning.txt")

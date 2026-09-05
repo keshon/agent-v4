@@ -12,10 +12,10 @@ import (
 // report only cares about the name and the path-shaped arguments.
 type mutStub struct{ name string }
 
-func (m mutStub) Name() string            { return m.name }
-func (m mutStub) Description() string     { return "stub" }
-func (mutStub) Mode() ToolMode            { return Exclusive }
-func (mutStub) Schema() json.RawMessage   { return json.RawMessage(`{}`) }
+func (m mutStub) Name() string          { return m.name }
+func (m mutStub) Description() string   { return "stub" }
+func (mutStub) Mode() ToolMode          { return Exclusive }
+func (mutStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
 func (mutStub) Run(context.Context, json.RawMessage) (string, error) {
 	return "ok", nil
 }

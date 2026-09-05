@@ -213,3 +213,40 @@ func TestParseAndValidate_ExistingFileNoWarning(t *testing.T) {
 		t.Fatalf("existing file flagged as new: %v", warnings)
 	}
 }
+
+// A plan checked `go test ./internal/tools/parseurl_test.go`. A single
+// _test.go file cannot compile alone when it uses the package around it,
+// so the check failed on correct code and the fix loop spent its whole
+// budget re-running variants of the command instead of reading it.
+func TestValidateCheck_RejectsUnsatisfiableGoTest(t *testing.T) {
+	unsatisfiable := []string{
+		"go test ./internal/tools/parseurl_test.go",
+		"go test -v internal/tools/parseurl_test.go",
+		"go test -run TestX ./pkg/thing_test.go",
+		"go build ./internal/tools/parseurl_test.go",
+	}
+	for _, cmd := range unsatisfiable {
+		s := &Subtask{ID: "s1", Check: Check{Type: "shell", Cmd: cmd}}
+		errs := validateCheck(s, map[string]bool{})
+		if len(errs) == 0 {
+			t.Errorf("validateCheck(%q) accepted a check that can never pass", cmd)
+		}
+	}
+}
+
+func TestValidateCheck_AcceptsRealGoCommands(t *testing.T) {
+	fine := []string{
+		"go test ./internal/tools/",
+		"go test ./...",
+		"go test -run TestParseURL ./internal/tools",
+		"go build ./...",
+		"go vet ./internal/mission",
+		"python stats.py",
+	}
+	for _, cmd := range fine {
+		s := &Subtask{ID: "s1", Check: Check{Type: "shell", Cmd: cmd}}
+		if errs := validateCheck(s, map[string]bool{}); len(errs) != 0 {
+			t.Errorf("validateCheck(%q) rejected a usable check: %v", cmd, errs)
+		}
+	}
+}

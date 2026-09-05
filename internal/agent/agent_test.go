@@ -766,7 +766,7 @@ type askUserStub struct {
 	answer     string
 }
 
-func (a askUserStub) Name() string            { return "ask_user" }
+func (a askUserStub) Name() string          { return "ask_user" }
 func (askUserStub) Description() string     { return "ask" }
 func (askUserStub) Mode() ToolMode          { return Exclusive }
 func (askUserStub) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
@@ -937,10 +937,10 @@ func TestAgent_MixedConcurrentAndExclusive_ExclusiveRunsAfterConcurrentBatch(t *
 func TestAgent_ToolLoop_FiresWhenSameToolRepeatsWithTweakedArgs(t *testing.T) {
 	client := &shellLoopClient{steps: 4, finalContent: "done"}
 	a := New(Config{
-		Client:       client,
-		Tools:        NewRegistry(echoToolStub{name: "run_shell"}),
-		System:       "sys",
-		SkipVerify:   true,
+		Client:     client,
+		Tools:      NewRegistry(echoToolStub{name: "run_shell"}),
+		System:     "sys",
+		SkipVerify: true,
 	})
 
 	if _, err := a.Run(context.Background(), "task"); err != nil {
