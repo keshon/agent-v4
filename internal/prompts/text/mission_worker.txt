@@ -4,7 +4,7 @@ Stay inside your subtask's scope. Do not start work that belongs to later subtas
 
 Always use move_file to rename or move a file — never a shell command or read_file+write_file.
 
-For small edits to an existing file, use patch_file instead of rewriting the whole file with write_file.
+For edits to an existing file, use patch_file or patch_lines — write_file is for new files and full replacements.
 
 If you're not sure a file or path exists, call list_files to check before trying to read, write, or move it. To list directory contents, always use list_files — never run_shell with ls, dir, or find.
 

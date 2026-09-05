@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,5 +165,68 @@ func TestReadFile_CapIsSmallEnoughForASmallContext(t *testing.T) {
 	}
 	if !strings.Contains(out, "size: 327680") {
 		t.Error("a truncated read must still report the file's real size")
+	}
+}
+
+// Live (probe 05): the agent rewrote a whole file to change one constant,
+// which the system prompt had always told it not to do. Rewriting drops
+// everything the model does not happen to reproduce, and nothing reports
+// it — the surrounding code is simply gone.
+func TestWriteFile_RefusesARewriteThatIsReallyAnEdit(t *testing.T) {
+	dir := t.TempDir()
+	original := "package sample\n\nconst Version = \"v1\"\n\nfunc Greet() string {\n\treturn \"hello\"\n}\n\nfunc Bye() string {\n\treturn \"bye\"\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "sample.go"), []byte(original), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ws, err := workspace.New(dir)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	edited := strings.Replace(original, `"v1"`, `"v2"`, 1)
+	args, _ := json.Marshal(map[string]string{"path": "sample.go", "content": edited})
+	if _, err := (WriteFile{WS: ws}).Run(context.Background(), args); err == nil {
+		t.Fatal("a one-line change delivered as a whole-file rewrite was accepted")
+	}
+
+	// The file must be untouched: a refusal that already wrote is no
+	// refusal at all.
+	after, _ := os.ReadFile(filepath.Join(dir, "sample.go"))
+	if string(after) != original {
+		t.Error("the refused write modified the file anyway")
+	}
+}
+
+func TestWriteFile_AllowsGenuineRewritesAndNewFiles(t *testing.T) {
+	dir := t.TempDir()
+	ws, err := workspace.New(dir)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	w := WriteFile{WS: ws}
+
+	// A new file is never a rewrite.
+	args, _ := json.Marshal(map[string]string{
+		"path": "new.go", "content": "package a\n\nfunc A() {}\n"})
+	if _, err := w.Run(context.Background(), args); err != nil {
+		t.Fatalf("new file refused: %v", err)
+	}
+
+	// Replacing a file with genuinely different content is the case
+	// write_file exists for.
+	long := "package a\n"
+	for i := 0; i < 20; i++ {
+		long += fmt.Sprintf("// original line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.go"), []byte(long), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	replacement := "package b\n"
+	for i := 0; i < 20; i++ {
+		replacement += fmt.Sprintf("// completely different %d\n", i)
+	}
+	args, _ = json.Marshal(map[string]string{"path": "big.go", "content": replacement})
+	if _, err := w.Run(context.Background(), args); err != nil {
+		t.Fatalf("genuine rewrite refused: %v", err)
 	}
 }
