@@ -135,11 +135,21 @@ type call struct {
 }
 
 type Result struct {
-	Probe    string   `json:"probe"`
-	Run      int      `json:"run"`
-	Passed   bool     `json:"passed"`
-	Steps    int      `json:"steps"`
-	Seconds  float64  `json:"seconds"`
+	Probe   string  `json:"probe"`
+	Run     int     `json:"run"`
+	Passed  bool    `json:"passed"`
+	Steps   int     `json:"steps"`
+	Seconds float64 `json:"seconds"`
+
+	// Errored means the run never reached the model — a dead backend, a
+	// bad seed path — so it says nothing about the agent and must not be
+	// scored. Without this the first thing a stopped koboldcpp produces
+	// is a table of red rows and failed checks, which reads exactly like
+	// a model that got worse. An instrument that cannot tell "the agent
+	// failed" from "nothing ran" is the same disease as a model grading
+	// its own work.
+	Errored bool `json:"errored,omitempty"`
+
 	RunError string   `json:"run_error,omitempty"`
 	Failures []string `json:"failures,omitempty"`
 	Trace    string   `json:"trace_log,omitempty"`
@@ -222,7 +232,10 @@ func main() {
 			fmt.Fprintln(results, string(line))
 
 			status := "PASS"
-			if !r.Passed {
+			switch {
+			case r.Errored:
+				status = "ERR "
+			case !r.Passed:
 				status = "FAIL"
 			}
 			fmt.Printf("  %s  %-22s run %d  %6.1fs  %2d steps", status, p.Name, run, r.Seconds, r.Steps)
@@ -349,6 +362,14 @@ func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model strin
 		if err != nil {
 			res.RunError = firstLine(err.Error())
 		}
+	}
+
+	// Zero steps with an error means no model response ever arrived, so
+	// the workspace checks below would only be measuring the seed. Report
+	// it as an error rather than scoring it.
+	if res.Steps == 0 && res.RunError != "" {
+		res.Errored = true
+		return res
 	}
 
 	res.Failures = append(res.Failures, checkWorkspace(runCtx, p, ws)...)
@@ -481,7 +502,15 @@ func summarize(all []Result) string {
 	var names []string
 	overall := tally{}
 
+	errored := 0
 	for _, r := range all {
+		// A run that never reached the model is not evidence either way.
+		// Counting it as a failure would mean a stopped backend silently
+		// reports the agent as broken.
+		if r.Errored {
+			errored++
+			continue
+		}
 		t, seen := byProbe[r.Probe]
 		if !seen {
 			t = &tally{}
@@ -497,6 +526,12 @@ func summarize(all []Result) string {
 	}
 	sort.Strings(names)
 
+	if overall.total == 0 {
+		return fmt.Sprintf("=== no scored runs ===\n  %d run(s) never reached the model — "+
+			"check the backend is up, then re-run. No pass rate is reported because "+
+			"there is nothing to report.", errored)
+	}
+
 	var b strings.Builder
 	b.WriteString("=== pass rate ===\n")
 	for _, n := range names {
@@ -506,6 +541,10 @@ func summarize(all []Result) string {
 	}
 	fmt.Fprintf(&b, "  %-22s %d/%d  %3.0f%%", "TOTAL", overall.pass, overall.total,
 		100*float64(overall.pass)/float64(overall.total))
+	if errored > 0 {
+		fmt.Fprintf(&b, "\n\n  %d run(s) never reached the model and are excluded — "+
+			"this rate covers %d of %d attempted.", errored, overall.total, overall.total+errored)
+	}
 	return b.String()
 }
 
