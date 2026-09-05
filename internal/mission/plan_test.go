@@ -67,8 +67,11 @@ func TestGeneratePlan_RetriesOnceWithValidationErrors(t *testing.T) {
 	bad := `{"subtasks":[{"id":"s1","milestone":"m","title":"t","goal":"do it","acceptance":["done"],"files_hint":["a.txt"],"check":{"type":"shell","cmd":"echo ok"}}]}`
 	client := &scriptClient{responses: []string{bad, validPlanJSON}}
 
+	// Candidates 1 isolates the repair path: resampling and repair are
+	// different levers, and this test is about the one that carries the
+	// errors back.
 	subtasks, _, err := GeneratePlan(context.Background(), client, PlanRequest{
-		Task: "task", ExistingFiles: map[string]bool{},
+		Task: "task", ExistingFiles: map[string]bool{}, Candidates: 1,
 	})
 	if err != nil {
 		t.Fatalf("GeneratePlan: %v", err)
@@ -90,7 +93,7 @@ func TestGeneratePlan_FailsLoudlyAfterTwoBadAttempts(t *testing.T) {
 	bad := `{"subtasks":[]}`
 	client := &scriptClient{responses: []string{bad, bad}}
 	_, _, err := GeneratePlan(context.Background(), client, PlanRequest{
-		Task: "task", ExistingFiles: map[string]bool{},
+		Task: "task", ExistingFiles: map[string]bool{}, Candidates: 1,
 	})
 	if err == nil {
 		t.Fatal("expected loud failure after two invalid plans — never loop on plan generation")
@@ -248,5 +251,59 @@ func TestValidateCheck_AcceptsRealGoCommands(t *testing.T) {
 		if errs := validateCheck(s, map[string]bool{}); len(errs) != 0 {
 			t.Errorf("validateCheck(%q) rejected a usable check: %v", cmd, errs)
 		}
+	}
+}
+
+// The plan is a single sample from the weakest link and everything
+// downstream inherits it. Live: the same three-file scaffold was rejected
+// by validation twice in one run and planned cleanly in the next.
+func TestGeneratePlan_KeepsTheBestScoringCandidate(t *testing.T) {
+	weak := `{"subtasks":[{"id":"s1","milestone":"m","title":"page","goal":"Create index.html.",` +
+		`"acceptance":["index.html exists"],"files_hint":["index.html"],` +
+		`"check":{"type":"file_exists","path":"index.html"}}]}`
+	strong := `{"subtasks":[{"id":"s1","milestone":"m","title":"page","goal":"Create index.html.",` +
+		`"acceptance":["index.html exists"],"files_hint":["index.html"],` +
+		`"check":{"type":"shell","cmd":"go build ./..."}}]}`
+
+	client := &scriptClient{responses: []string{weak, strong, weak}}
+	subtasks, _, err := GeneratePlan(context.Background(), client, PlanRequest{
+		Task: "make a page", ExistingFiles: map[string]bool{}, Candidates: 3,
+	})
+	if err != nil {
+		t.Fatalf("GeneratePlan: %v", err)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("calls = %d, want 3 candidates", len(client.requests))
+	}
+	if subtasks[0].Check.Type != "shell" {
+		t.Fatalf("kept the weaker plan: check = %+v", subtasks[0].Check)
+	}
+}
+
+func TestScorePlan_PrefersStrongerChecks(t *testing.T) {
+	weak := []Subtask{{Check: Check{Type: "file_exists", Path: "a.go"}}}
+	mid := []Subtask{{Check: Check{Type: "content_contains", Path: "a.go", Contains: "func X"}}}
+	strong := []Subtask{{Check: Check{Type: "shell", Cmd: "go test ./..."}}}
+	if !(scorePlan(strong) > scorePlan(mid) && scorePlan(mid) > scorePlan(weak)) {
+		t.Fatalf("ordering wrong: strong=%v mid=%v weak=%v",
+			scorePlan(strong), scorePlan(mid), scorePlan(weak))
+	}
+}
+
+// Two subtasks naming the same file means the second rewrites what the
+// first produced — the shape that ends with one worker undoing another's
+// work.
+func TestScorePlan_PenalisesOverlappingFiles(t *testing.T) {
+	clean := []Subtask{
+		{Check: Check{Type: "content_contains", Path: "a.go", Contains: "x"}, FilesHint: []string{"a.go"}},
+		{Check: Check{Type: "content_contains", Path: "b.go", Contains: "y"}, FilesHint: []string{"b.go"}},
+	}
+	overlapping := []Subtask{
+		{Check: Check{Type: "content_contains", Path: "a.go", Contains: "x"}, FilesHint: []string{"a.go"}},
+		{Check: Check{Type: "content_contains", Path: "b.go", Contains: "y"}, FilesHint: []string{"a.go", "b.go"}},
+	}
+	if scorePlan(overlapping) >= scorePlan(clean) {
+		t.Fatalf("overlap not penalised: clean=%v overlapping=%v",
+			scorePlan(clean), scorePlan(overlapping))
 	}
 }

@@ -22,6 +22,15 @@ type PlanRequest struct {
 	ExistingFiles map[string]bool // real relative paths, for hallucination checks
 	EditNote      string          // human rejection note from the approval gate, if any
 	MaxTokens     int
+
+	// Candidates is how many plans to generate and score before picking
+	// one. Zero means defaultPlanCandidates; 1 disables the search and
+	// keeps the first valid plan, which is what the A/B comparison needs.
+	Candidates int
+
+	// OnEvent, if set, narrates the search — which candidate was kept and
+	// what the alternatives scored.
+	OnEvent func(format string, args ...any)
 }
 
 // GeneratePlan makes one tool-free, grammar-constrained model call and
@@ -59,8 +68,26 @@ func GenerateReplan(ctx context.Context, client llm.Client, req ReplanRequest) (
 	return generateSubtasks(ctx, client, messages, req.PlanRequest)
 }
 
-// generateSubtasks is the shared call-validate-retry core for plan and
-// replan generation.
+// defaultPlanCandidates is how many plans are generated and scored.
+//
+// The plan is a single sample from the weakest link and everything
+// downstream inherits it: a bad check wastes every fix worker, and a
+// replan is another single sample from the same model that just made the
+// mistake. Live, on one task in one afternoon: the same three-file
+// scaffold was rejected by validation twice in one run and planned
+// cleanly in the next. Plan quality is a coin flip, and a bad flip costs
+// the whole mission.
+//
+// This is the cheapest place in the system to spend extra calls. A plan
+// call is a couple of thousand prompt tokens against a mission that
+// burns twenty worker calls executing whatever it says.
+const defaultPlanCandidates = 3
+
+// generateSubtasks generates several candidate plans, scores them
+// mechanically, and returns the best. If none validate, it falls back to
+// one repair retry carrying the specific errors — independent sampling
+// finds a good plan, repair fixes a nearly-good one, and they solve
+// different problems.
 func generateSubtasks(ctx context.Context, client llm.Client, messages []llm.Message, req PlanRequest) (subtasks []Subtask, warnings []string, err error) {
 	if req.EditNote != "" {
 		messages = append(messages, llm.Message{
@@ -69,37 +96,140 @@ func generateSubtasks(ctx context.Context, client llm.Client, messages []llm.Mes
 		})
 	}
 
-	const attempts = 2
-	var lastRaw string
-	var lastErrs []string
-	for i := 0; i < attempts; i++ {
-		if i > 0 {
-			messages = append(messages,
-				llm.Message{Role: llm.RoleAssistant, Content: lastRaw},
-				llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(prompts.MissionPlanRetry, strings.Join(lastErrs, "\n"))},
-			)
-		}
-		resp, err := client.Chat(ctx, llm.ChatRequest{
-			Messages:    messages,
+	candidates := req.Candidates
+	if candidates <= 0 {
+		candidates = defaultPlanCandidates
+	}
+
+	ask := func(msgs []llm.Message) (string, error) {
+		resp, cerr := client.Chat(ctx, llm.ChatRequest{
+			Messages:    msgs,
 			Grammar:     PlanGrammar,
 			Temperature: planTemperature,
 			MaxTokens:   req.MaxTokens,
 		})
-		if err != nil {
+		if cerr != nil {
 			// A chat failure here is the backend, not the plan — mark it
 			// infra so the Runner stops resumably instead of failing the
 			// mission (or burning the replan budget it was called with).
-			return nil, nil, fmt.Errorf("%w: plan call: %v", errInfra, err)
+			return "", fmt.Errorf("%w: plan call: %v", errInfra, cerr)
 		}
-		lastRaw = resp.Message.Content
+		return resp.Message.Content, nil
+	}
 
-		subtasks, warnings, lastErrs = parseAndValidate(lastRaw, req.Task, req.ExistingFiles)
-		if len(lastErrs) == 0 {
-			return subtasks, warnings, nil
+	var (
+		best      []Subtask
+		bestWarns []string
+		bestScore float64
+		found     bool
+		scores    []string
+		lastRaw   string
+		lastErrs  []string
+	)
+
+	for i := 0; i < candidates; i++ {
+		raw, cerr := ask(messages)
+		if cerr != nil {
+			if found {
+				break // a backend that died mid-search still leaves a usable plan
+			}
+			return nil, nil, cerr
+		}
+		subs, warns, errs := parseAndValidate(raw, req.Task, req.ExistingFiles)
+		if len(errs) > 0 {
+			lastRaw, lastErrs = raw, errs
+			scores = append(scores, "rejected")
+			continue
+		}
+		score := scorePlan(subs)
+		scores = append(scores, fmt.Sprintf("%.1f", score))
+		if !found || score > bestScore {
+			best, bestWarns, bestScore, found = subs, warns, score, true
 		}
 	}
-	return nil, nil, fmt.Errorf("plan rejected by validation after %d attempts: %s\nraw output:\n%s",
-		attempts, strings.Join(lastErrs, "; "), lastRaw)
+
+	if found {
+		if req.OnEvent != nil && candidates > 1 {
+			req.OnEvent("plan: kept the best of %d candidates (scores: %s)",
+				candidates, strings.Join(scores, ", "))
+		}
+		return best, bestWarns, nil
+	}
+
+	// Nothing validated. Repair is a different lever from resampling: it
+	// carries the exact errors back, which is what actually fixes a plan
+	// that was close.
+	messages = append(messages,
+		llm.Message{Role: llm.RoleAssistant, Content: lastRaw},
+		llm.Message{Role: llm.RoleUser, Content: fmt.Sprintf(prompts.MissionPlanRetry, strings.Join(lastErrs, "\n"))},
+	)
+	raw, cerr := ask(messages)
+	if cerr != nil {
+		return nil, nil, cerr
+	}
+	subs, warns, errs := parseAndValidate(raw, req.Task, req.ExistingFiles)
+	if len(errs) == 0 {
+		return subs, warns, nil
+	}
+	return nil, nil, fmt.Errorf("plan rejected by validation after %d candidates and a repair attempt: %s\nraw output:\n%s",
+		candidates, strings.Join(errs, "; "), raw)
+}
+
+// scorePlan ranks plans that already passed validation. Higher is better.
+//
+// Purely mechanical: asking a weak model which of its own plans is best
+// would just add another coin flip. Two things are measured.
+//
+// Check strength, averaged so a plan is not rewarded for having more
+// subtasks — the validator already bounds decomposition at both ends. A
+// check that builds or tests proves the most, a symbol in a file proves
+// something specific, mere existence proves the least.
+//
+// File overlap, penalised: two subtasks naming the same file in
+// files_hint means the second rewrites what the first produced, which is
+// the shape that ends with one worker undoing another's work.
+func scorePlan(subs []Subtask) float64 {
+	if len(subs) == 0 {
+		return 0
+	}
+	var strength float64
+	owner := map[string]int{}
+	overlaps := 0
+	for i := range subs {
+		strength += checkStrength(subs[i].Check)
+		for _, p := range subs[i].FilesHint {
+			p = normalizePlanPath(p)
+			if p == "" {
+				continue
+			}
+			owner[p]++
+			if owner[p] == 2 {
+				overlaps++
+			}
+		}
+	}
+	return strength/float64(len(subs)) - float64(overlaps)
+}
+
+func checkStrength(c Check) float64 {
+	switch c.Type {
+	case "shell":
+		cmd := strings.ToLower(c.Cmd)
+		// A command that compiles or runs the work proves far more than
+		// one that merely exits zero.
+		for _, strong := range []string{"test", "build", "vet", "lint", "make"} {
+			if strings.Contains(cmd, strong) {
+				return 3
+			}
+		}
+		return 2
+	case "content_contains":
+		return 2
+	case "file_exists", "http":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func parseAndValidate(raw, task string, existing map[string]bool) (subtasks []Subtask, warnings, errs []string) {

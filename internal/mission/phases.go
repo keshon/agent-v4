@@ -47,6 +47,11 @@ type Runner struct {
 	// fix loop entirely.
 	MaxFixAttempts int
 
+	// PlanCandidates is how many plans are generated and scored before one
+	// is picked. Zero uses the package default; 1 keeps the first valid
+	// plan, which is what an A/B comparison of the search needs.
+	PlanCandidates int
+
 	// MaxReplans bounds how many times a stopped plan may be replaced by
 	// a new one for the remaining work. Zero means 1; negative disables
 	// replanning. Together with MaxFixAttempts this bounds total worker
@@ -298,6 +303,8 @@ func (r *Runner) runPlan(ctx context.Context, m *Mission) error {
 			ExistingFiles: existing,
 			EditNote:      editNote,
 			MaxTokens:     r.MaxTokens,
+			Candidates:    r.PlanCandidates,
+			OnEvent:       r.event,
 		})
 		if err != nil {
 			return err
@@ -491,6 +498,8 @@ func (r *Runner) tryReplan(ctx context.Context, m *Mission, reason string) error
 				ExistingFiles: existing,
 				EditNote:      editNote,
 				MaxTokens:     r.MaxTokens,
+				Candidates:    r.PlanCandidates,
+				OnEvent:       r.event,
 			},
 			Record: m.RenderReport(),
 			Reason: reason,

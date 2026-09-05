@@ -78,8 +78,11 @@ func newRunner(t *testing.T, client llm.Client) (*Runner, string) {
 		Dir:    dir,
 		Procs:  tools.NewBackgroundProcesses(),
 		// Most tests script an exact call sequence; the review stage has
-		// its own dedicated tests below.
-		SkipReview: true,
+		// its own dedicated tests below. PlanCandidates is 1 for the same
+		// reason — the best-of-N search has its own tests in plan_test.go,
+		// and here it would only make every scripted response count wrong.
+		SkipReview:     true,
+		PlanCandidates: 1,
 	}, dir
 }
 
