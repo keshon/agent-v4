@@ -558,8 +558,8 @@ func vacuousShellCheck(cmd string) bool {
 // mutatingShellCheck flags a check that performs the subtask instead of
 // verifying it.
 //
-// Live on 2026-09-05, probe 16-mission-fix, three runs out of three. The
-// subtask was "create numbers.txt" and the model gave it this check:
+// Observed three runs out of three on a probe that had passed before it.
+// The subtask was "create numbers.txt" and the model gave it this check:
 //
 //	python -c "with open('numbers.txt', 'w') as f: f.write('3\n5\n34\n')"
 //

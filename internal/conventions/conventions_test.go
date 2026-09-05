@@ -295,7 +295,13 @@ func (r *repo) read(t *testing.T, path string) string {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	r.cache[path] = string(data)
+	// Normalized to LF because git hands Windows checkouts CRLF, and every
+	// rule here reasons about text. parseRules splits paragraphs on a
+	// blank line, which never occurs as "\n\n" in a CRLF file: the whole
+	// document parsed as one blob, one rule was found, and the other eight
+	// reported themselves unstated. It failed loudly here and would fail
+	// the same way on any fresh clone on this OS.
+	r.cache[path] = strings.ReplaceAll(string(data), "\r\n", "\n")
 	return r.cache[path]
 }
 

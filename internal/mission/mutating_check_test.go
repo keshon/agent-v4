@@ -7,7 +7,7 @@ import "testing"
 // validator sees them. The rejected one killed the mission three runs out
 // of three; the accepted ones came from the same plans and must keep
 // working, or this guard trades one broken probe for several.
-func TestMutatingShellCheck(t *testing.T) {
+func TestMutatingShellCheck_Probe16CheckThatWroteNumbersTxt(t *testing.T) {
 	for _, tc := range []struct {
 		cmd    string
 		reject bool
