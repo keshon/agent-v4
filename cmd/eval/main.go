@@ -168,6 +168,9 @@ func main() {
 	maxTokens := flag.Int("max-tokens", 8192, "generation budget per response")
 	dry := flag.Bool("dry", false, "load and validate every probe, then exit — checking a probe "+
 		"should not cost a model round-trip")
+	requireModel := flag.String("require-model", "", "refuse to run unless the model the backend "+
+		"reports contains this substring — a local server loads whatever it was last started "+
+		"with, and comparing a score against one from different weights is worse than having no score")
 	flag.Parse()
 
 	if *dry {
@@ -217,6 +220,14 @@ func main() {
 	backendModel, err := probe.ModelName(ctx)
 	if err != nil {
 		backendModel = "(unknown)"
+	}
+	// Live on 2026-09-05: koboldcpp was restarted and came back holding
+	// different weights, so a 4/8 looked like a refactor regression next
+	// to the previous day's 8/8. Nothing in the run said otherwise until
+	// someone read the model line.
+	if *requireModel != "" && !strings.Contains(backendModel, *requireModel) {
+		log.Fatalf("backend is serving %q, which does not contain %q — "+
+			"load the intended model or drop -require-model", backendModel, *requireModel)
 	}
 	fmt.Printf("backend %s\nmodel   %s\ncontext %d\n%d probes x %d runs\n\n",
 		*backend, backendModel, contextLimit, len(probes), *runs)
