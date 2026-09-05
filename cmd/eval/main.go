@@ -68,6 +68,17 @@ type Probe struct {
 	// agent loop — probes 15-17 in eval/prompts.
 	Mission bool `json:"mission"`
 
+	// Tier selects how often a probe is worth running, assigned from
+	// measured behaviour rather than taste:
+	//
+	//   smoke   never failed and its step count never varied. Cheap, and
+	//           a failure here means something is badly broken.
+	//   signal  varies across runs. This is where the information is, and
+	//           where most of the wall clock goes.
+	//   mission the planner pipeline. Expensive; run when mission code
+	//           changed or at a checkpoint.
+	Tier string `json:"tier"`
+
 	// Seed is a directory copied in as the starting workspace, relative to
 	// the repo root. Empty means start from an empty directory.
 	Seed string `json:"seed"`
@@ -206,6 +217,8 @@ func main() {
 	model := flag.String("model", "local", "model name (often ignored by local servers)")
 	dir := flag.String("probes", "eval/probes", "directory of probe .json files")
 	only := flag.String("only", "", "run only probes whose name contains this substring")
+	tier := flag.String("tier", "", "run only probes in this tier: smoke (fast canary), signal "+
+		"(where the information is), mission (the planner pipeline). Empty runs every tier")
 	runs := flag.Int("runs", 1, "runs per probe — a weak model is stochastic, so one pass "+
 		"proves very little")
 	outDir := flag.String("out", "eval/results", "directory for results.jsonl and per-run traces")
@@ -227,13 +240,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("load probes: %v", err)
 		}
-		for _, p := range probes {
+		for _, p := range keepTier(probes, *tier) {
 			mode := "agent"
 			if p.Mission {
 				mode = "mission"
 			}
-			fmt.Printf("  %-22s %-7s %d verify, %d trace, %d answer, max %d steps\n",
-				p.Name, mode, len(p.Verify), len(p.Trace), len(p.Answer), p.MaxSteps)
+			fmt.Printf("  %-22s %-7s %-7s %d verify, %d trace, %d answer\n",
+				p.Name, p.Tier, mode, len(p.Verify), len(p.Trace), len(p.Answer))
 		}
 		fmt.Printf("%d probes OK\n", len(probes))
 		return
@@ -243,6 +256,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("load probes: %v", err)
 	}
+	probes = keepTier(probes, *tier)
 	if len(probes) == 0 {
 		log.Fatalf("no probes matched in %s", *dir)
 	}
@@ -313,6 +327,20 @@ func main() {
 // The return value is named so the deferred timing write lands in what
 // the caller receives: with an unnamed result, `return res` copies before
 // the defer runs and every duration is reported as zero.
+// keepTier filters by tier; an empty tier keeps everything.
+func keepTier(probes []Probe, tier string) []Probe {
+	if tier == "" {
+		return probes
+	}
+	kept := make([]Probe, 0, len(probes))
+	for _, p := range probes {
+		if p.Tier == tier {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
 func runOnce(ctx context.Context, p Probe, run int, runDir, backend, model string,
 	contextLimit, maxTokens int, drySampler bool) (res Result) {
 
@@ -673,6 +701,11 @@ func loadProbes(dir, only string) ([]Probe, error) {
 		// worse than not having the probe at all.
 		if len(p.Verify) == 0 && len(p.Trace) == 0 && len(p.Answer) == 0 && p.MaxSteps == 0 {
 			return nil, fmt.Errorf("%s: nothing asserted — it would score itself", path)
+		}
+		switch p.Tier {
+		case "smoke", "signal", "mission":
+		default:
+			return nil, fmt.Errorf("%s: tier is %q, want smoke, signal or mission", path, p.Tier)
 		}
 		p.Name = name
 		out = append(out, p)

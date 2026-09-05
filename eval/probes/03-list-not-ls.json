@@ -1,6 +1,7 @@
 {
   "prompt": "eval/prompts/03-list-not-ls.md",
   "task": "what files are in the workspace root? just list their names",
+  "tier": "smoke",
   "seed": "eval/fixtures",
   "trace": [
     {

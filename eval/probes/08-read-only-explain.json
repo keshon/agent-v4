@@ -1,6 +1,7 @@
 {
   "prompt": "eval/prompts/08-read-only-explain.md",
   "task": "explain what sample.go does in 2-3 sentences. do not modify any files",
+  "tier": "smoke",
   "seed": "eval/fixtures",
   "trace": [
     {

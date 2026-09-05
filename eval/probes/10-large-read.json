@@ -1,14 +1,26 @@
 {
   "prompt": "eval/prompts/10-large-read.md",
   "task": "read big.txt and tell me the exact file size in bytes and whether it looks like text",
+  "tier": "signal",
   "seed": "eval/fixtures",
   "max_steps": 5,
   "answer": [
-    {"regex": "205,?264", "mode": "required",
-     "why": "the real size of the fixture; anything else means it guessed rather than reading the FILE header"}
+    {
+      "regex": "205,?264",
+      "mode": "required",
+      "why": "the real size of the fixture; anything else means it guessed rather than reading the FILE header"
+    }
   ],
   "trace": [
-    {"tool": "read_file", "mode": "required", "why": "the size comes from the tool, not from the model"},
-    {"tool": "write_file", "mode": "forbidden", "why": "a question about a file changes nothing"}
+    {
+      "tool": "read_file",
+      "mode": "required",
+      "why": "the size comes from the tool, not from the model"
+    },
+    {
+      "tool": "write_file",
+      "mode": "forbidden",
+      "why": "a question about a file changes nothing"
+    }
   ]
 }

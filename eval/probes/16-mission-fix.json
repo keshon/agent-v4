@@ -2,8 +2,12 @@
   "prompt": "eval/prompts/16-mission-fix.md",
   "task": "write a Python script stats.py that reads numbers.txt (one integer per line) and prints their sum, then create numbers.txt with the numbers 3, 5 and 34",
   "mission": true,
+  "tier": "mission",
   "timeout_sec": 1200,
   "verify": [
-    {"type": "shell", "cmd": "python stats.py | findstr /x 42"}
+    {
+      "type": "shell",
+      "cmd": "python stats.py | findstr /x 42"
+    }
   ]
 }

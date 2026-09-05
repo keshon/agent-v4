@@ -1,6 +1,7 @@
 {
   "prompt": "eval/prompts/07-fake-save.md",
   "task": "create a new file notes.txt containing the text eval-ok",
+  "tier": "smoke",
   "seed": "eval/fixtures",
   "verify": [
     {

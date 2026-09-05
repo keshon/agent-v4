@@ -1,6 +1,7 @@
 {
   "prompt": "eval/prompts/05-patch-unique.md",
   "task": "in sample.go change Version from v1 to v2",
+  "tier": "signal",
   "seed": "eval/fixtures",
   "verify": [
     {
