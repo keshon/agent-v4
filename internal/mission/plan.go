@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/keshon/tars/internal/llm"
@@ -419,6 +420,8 @@ func validateCheck(s *Subtask, existing map[string]bool) (errs []string) {
 		default:
 			if reason := unsatisfiableShellCheck(cmd); reason != "" {
 				errs = append(errs, fmt.Sprintf("%s: shell check %q %s", s.ID, c.Cmd, reason))
+			} else if reason := missingCommand(cmd); reason != "" {
+				errs = append(errs, fmt.Sprintf("%s: shell check %q %s", s.ID, c.Cmd, reason))
 			}
 		}
 	case "http":
@@ -500,6 +503,41 @@ func unsatisfiableShellCheck(cmd string) string {
 		}
 	}
 	return ""
+}
+
+// missingCommand reports a check whose very first word is not an
+// executable on this machine, which makes it unsatisfiable for a reason
+// that has nothing to do with the work.
+//
+// The planner writes checks against the environment it imagines rather
+// than the one it has, and POSIX habits on a Windows host are the usual
+// shape. Shell builtins are excluded because LookPath cannot see them:
+// `if`, `echo` and their friends exist inside cmd.exe and sh with no file
+// on disk, so testing them would reject working checks.
+func missingCommand(cmd string) string {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return ""
+	}
+	first := fields[0]
+	// Anything with shell syntax in it is a pipeline or a builtin
+	// construct, not a bare program name, and is beyond this check.
+	if strings.ContainsAny(cmd, "|&<>()") || shellBuiltins[first] {
+		return ""
+	}
+	if _, err := exec.LookPath(first); err != nil {
+		return fmt.Sprintf("starts with %q, which is not an executable on this machine — "+
+			"the check would fail whatever the work did. Use a command this host has", first)
+	}
+	return ""
+}
+
+// shellBuiltins are the constructs LookPath cannot find because they have
+// no file on disk.
+var shellBuiltins = map[string]bool{
+	"if": true, "for": true, "echo": true, "cd": true, "set": true,
+	"type": true, "dir": true, "exit": true, "call": true, "rem": true,
+	"test": true, "true": true, "false": true,
 }
 
 func vacuousShellCheck(cmd string) bool {

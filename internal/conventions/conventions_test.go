@@ -23,6 +23,7 @@ var checks = map[string]func(*testing.T, *repo){
 	"doc-identifiers":     checkDocIdentifiers,
 	"comment-dates":       checkCommentDates,
 	"cgo-free":            checkCgoFree,
+	"skill-paths":         checkSkillPaths,
 }
 
 func TestConventions(t *testing.T) {
@@ -393,6 +394,36 @@ func checkCgoFree(t *testing.T, r *repo) {
 	for _, f := range r.goFiles {
 		if cgoImport.MatchString(r.read(t, f)) {
 			t.Errorf("%s imports C%s", r.rel(f), r.rule("cgo-free"))
+		}
+	}
+}
+
+// skillRef matches a skills/<name>/SKILL.md path written in a prompt.
+var skillRef = regexp.MustCompile(`skills/[A-Za-z0-9_-]+/SKILL\.md`)
+
+// checkSkillPaths keeps prompts honest about files the agent may not have.
+func checkSkillPaths(t *testing.T, r *repo) {
+	dir := filepath.Join(r.root, "internal", "prompts", "text")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read prompt directory: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") {
+			continue
+		}
+		body := r.read(t, filepath.Join(dir, e.Name()))
+		for _, ref := range skillRef.FindAllString(body, -1) {
+			if _, err := os.Stat(filepath.Join(r.root, filepath.FromSlash(ref))); err != nil {
+				t.Errorf("internal/prompts/text/%s names %s, which does not exist%s",
+					e.Name(), ref, r.rule("skill-paths"))
+			}
+			for _, line := range strings.Split(body, "\n") {
+				if strings.Contains(line, ref) && !strings.Contains(line, "if it exists") {
+					t.Errorf("internal/prompts/text/%s names %s without saying \"if it exists\"%s",
+						e.Name(), ref, r.rule("skill-paths"))
+				}
+			}
 		}
 	}
 }

@@ -307,3 +307,31 @@ func TestScorePlan_PenalisesOverlappingFiles(t *testing.T) {
 			scorePlan(clean), scorePlan(overlapping))
 	}
 }
+
+// The planner writes checks against the environment it imagines rather
+// than the one it has. A check whose first word is not an executable here
+// fails for a reason that says nothing about the work.
+func TestValidateCheck_RejectsACommandThisHostDoesNotHave(t *testing.T) {
+	s := &Subtask{ID: "s1", Check: Check{Type: "shell",
+		Cmd: "definitely-not-a-real-binary-xyz --version"}}
+	if errs := validateCheck(s, map[string]bool{}); len(errs) == 0 {
+		t.Fatal("accepted a check whose command does not exist")
+	}
+}
+
+// Shell builtins have no file on disk, and pipelines are not bare program
+// names. Rejecting either would throw out working checks. (echo is absent
+// on purpose: it is a builtin, but it is also a check that cannot fail,
+// which vacuousShellCheck has always rejected.)
+func TestValidateCheck_AllowsBuiltinsAndPipelines(t *testing.T) {
+	for _, cmd := range []string{
+		"if exist stats.py exit 0",
+		"go test ./... | findstr ok",
+		"go build ./...",
+	} {
+		s := &Subtask{ID: "s1", Check: Check{Type: "shell", Cmd: cmd}}
+		if errs := validateCheck(s, map[string]bool{}); len(errs) != 0 {
+			t.Errorf("validateCheck(%q) rejected a usable check: %v", cmd, errs)
+		}
+	}
+}

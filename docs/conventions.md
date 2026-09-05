@@ -86,6 +86,12 @@ referenced by `internal/prompts/prompts.go`. An orphaned prompt file is either
 dead weight or a prompt someone forgot to wire up, and both look the same from
 outside.
 
+**[enforced: skill-paths]** Every `skills/.../SKILL.md` a prompt names exists in the
+repository, and every prompt that names one says "if it exists". A model told
+to read a file that is not there spends a turn reasoning about the
+contradiction — live, one concluded the instruction itself was an error — and
+the agent's workspace is often not this repository.
+
 **[practice]** Prompts live as `.txt`, not Go string constants. A one-sentence
 wording change should be a one-line diff, not a change buried in a
 multi-line concatenation.
