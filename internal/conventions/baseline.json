@@ -1,0 +1,9 @@
+{
+  "comment-dates": {
+    "cmd/eval/main.go": 3,
+    "internal/agent/agent.go": 3,
+    "internal/mission/grammar.go": 1,
+    "internal/mission/plan.go": 1,
+    "internal/mission/spec.go": 1
+  }
+}

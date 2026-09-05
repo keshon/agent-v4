@@ -1,92 +1,71 @@
-# Agent eval prompts
+# Evals
 
-Hand-run probes for a **local weak model** (12–25B). Not automated CI —
-the goal is to find failure *shapes*, not to score a number.
+Frozen scenarios for a weak local model, scored by a program.
 
-## Reset fixtures between runs
+- `prompts/` — the write-up for each scenario: what it stresses, what counts as
+  a pass, what counts as a failure. Written for a human.
+- `probes/` — the machine-checkable form of those criteria.
+- `fixtures/` — the seed workspace probes start from. Copied per run, never
+  written to.
+- `results/` — output, gitignored.
 
-```bash
-./eval/reset-fixtures.sh
-# optional large file for prompt 10:
-head -c 150000 /dev/urandom | base64 > eval/fixtures/big.txt
-```
-
-## Repeatability matrix (accidental vs repeatable success)
+## Running
 
 ```bash
-./eval/repeatability.sh 01-git-ambiguous 5
+go run ./cmd/eval -dry                          # validate probes, no model calls
+go run ./cmd/eval                               # everything, once each
+go run ./cmd/eval -only 0 -runs 3               # probes 03-10, three runs each
+go run ./cmd/eval -require-model qwen           # refuse to start on other weights
 ```
 
-Logs land in `eval/log/repeatability/`. Compare step counts and tool
-choices across runs. To isolate skills, temporarily rename `skills/git`.
+Each run writes `results/<timestamp>/` containing `results.jsonl`, `meta.json`
+recording which model produced the numbers, and a full request/response trace
+per run.
 
-## How to run
+`-runs` matters. A weak model is stochastic, and a single pass is close to no
+evidence. Step counts are recorded for every run whether or not the probe
+scores them — the difference between passing in 4 steps and passing in 13 is
+usually the thing worth reading.
 
-From repo root, with koboldcpp (or similar) already up:
+## How a probe is scored
 
-```bash
-# baseline flags most evals assume
-FLAGS="-log-max 300"
+Three independent verdicts, all of which must hold:
 
-# file-mutation tests use the mini workspace
-WS="-workspace eval/fixtures"
+| Field | Asserts |
+|---|---|
+| `verify` | what the workspace contains afterwards, using `mission.Check` |
+| `trace` | which tools were called, with `mode`, `args_regex` and `max_calls` |
+| `answer` | what the run reported, by regex |
 
-go run ./cmd/agent $FLAGS $WS "PROMPT HERE"
+Plus `max_steps`, but only where the write-up states a limit.
+
+A run that never reached the model is reported as `ERR` and excluded from the
+rate. A run the harness had to cut off is a failure, however the workspace
+happens to look.
+
+## Adding a probe
+
+Write the scenario in `prompts/` first, then mechanize it. Criteria come from
+the write-up — a threshold invented while writing the JSON is a number that
+will fail someday for no stated reason.
+
+```json
+{
+  "prompt": "eval/prompts/07-fake-save.md",
+  "task": "create a new file notes.txt containing the text eval-ok",
+  "seed": "eval/fixtures",
+  "verify": [{"type": "content_contains", "path": "notes.txt", "contains": "eval-ok"}],
+  "trace": [{"tool": "write_file", "mode": "required", "why": "text in a reply saves nothing"}]
+}
 ```
 
-For Go-change tests against the real repo:
+`why` is quoted in the failure, so a red row explains itself without opening
+the write-up. Set `"mission": true` to run the planner pipeline instead of the
+direct loop.
 
-```bash
-go run ./cmd/agent $FLAGS -verify-cmd "go test ./..." "PROMPT"
-```
+## Coverage
 
-Each prompt file lists recommended flags. Save task id from output; inspect
-`.agent/tasks/<id>/state.json` when a run looks wrong.
+Probes exist for 03-11 and 13-17. Three write-ups are not yet mechanized:
 
-## How to judge
-
-| Signal | Usually means |
-|--------|----------------|
-| >8 steps, no mutation | search / shell loop (SearchFatigue, ToolLoop) |
-| `run_shell` + ls/dir | ignored list_files discipline |
-| `ren`/`mv` in shell for rename | ignored move_file |
-| `git log … .git` | ignored skills/git |
-| Text claims file saved, 0 writes in verify | fake completion |
-| `run_shell` for `npm run dev` | long-process trap |
-| Hits max steps (25) | stuck or over-exploring |
-| `-verify-cmd` FAILED but agent says done | verify gate should block — bug |
-| "Let me write/do X" then nothing executes | check debug log for `finish_reason: "length"` — backend truncation; the loop should nudge and continue, not accept it |
-
-**Pass** = task actually done (check disk / command output), ≤ reasonable
-steps for a weak model (see each prompt), no regression traps in the table.
-
-## Prompt index
-
-| ID | File | What it stresses |
-|----|------|------------------|
-| 01 | `prompts/01-git-ambiguous.md` | Git path literalism, shell loops |
-| 02 | `prompts/02-git-clean.md` | Control — should be fast (like a6bf9516) |
-| 03 | `prompts/03-list-not-ls.md` | list_files vs run_shell ls |
-| 04 | `prompts/04-rename-move-file.md` | move_file vs shell mv |
-| 05 | `prompts/05-patch-unique.md` | patch_file happy path |
-| 06 | `prompts/06-patch-ambiguous.md` | non-unique patch match |
-| 07 | `prompts/07-fake-save.md` | claims done without write_file |
-| 08 | `prompts/08-read-only-explain.md` | finish without spurious writes |
-| 09 | `prompts/09-grep-then-edit.md` | grep_files → patch, not read-all |
-| 10 | `prompts/10-large-read.md` | read_file truncation cap |
-| 11 | `prompts/11-delegate-trap.md` | delegate on cohesive single file |
-| 12 | `prompts/12-ask-user.md` | ambiguous spec → ask_user |
-| 13 | `prompts/13-dev-server-trap.md` | run_shell vs start_background |
-| 14 | `prompts/14-multi-file-parallel.md` | delegate_task in one step (stretch) |
-| 15 | `prompts/15-mission-smoke.md` | mission mode: plan grammar, workers, checks |
-| 16 | `prompts/16-mission-fix.md` | mission fix loop convergence, replan path |
-| 17 | `prompts/17-doom-lite.md` | full mission pipeline on the motivating stress case |
-
-## Fixtures
-
-`eval/fixtures/` is a tiny workspace committed for mutation tests. Regenerate
-the large file before prompt 10:
-
-```bash
-head -c 150000 /dev/urandom | base64 > eval/fixtures/big.txt
-```
+- `01`, `02` — need a dedicated git seed fixture
+- `12` — its pass condition is an OR across check kinds
