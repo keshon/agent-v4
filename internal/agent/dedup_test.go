@@ -119,9 +119,9 @@ func TestAgent_NonIdempotentTools_NeverDeduped(t *testing.T) {
 
 type countingConcurrentStub struct{ runs *int32 }
 
-func (countingConcurrentStub) Name() string          { return "check_url" }
-func (countingConcurrentStub) Description() string   { return "stub" }
-func (countingConcurrentStub) Mode() ToolMode        { return Concurrent }
+func (countingConcurrentStub) Name() string            { return "check_url" }
+func (countingConcurrentStub) Description() string     { return "stub" }
+func (countingConcurrentStub) Mode() ToolMode          { return Concurrent }
 func (countingConcurrentStub) Schema() json.RawMessage { return json.RawMessage(`{}`) }
 func (c countingConcurrentStub) Run(context.Context, json.RawMessage) (string, error) {
 	atomic.AddInt32(c.runs, 1)
@@ -177,4 +177,59 @@ func (countingWriteStub) Schema() json.RawMessage { return json.RawMessage(`{}`)
 func (c countingWriteStub) Run(context.Context, json.RawMessage) (string, error) {
 	atomic.AddInt32(c.runs, 1)
 	return "wrote ok", nil
+}
+
+// A model re-reading one file rarely spells the arguments the same way
+// twice: {"path":"x"} one step, {"path": "x", "metadata_only": false} the
+// next. On raw bytes those are different keys, so the repeat guard never
+// fires and the same file comes back again — observed live on 2026-09-05
+// as two consecutive reads of a file that had just been confirmed.
+func TestCallKey_IgnoresArgumentSpelling(t *testing.T) {
+	same := []string{
+		`{"path":"a.go"}`,
+		`{"path": "a.go"}`,
+		`{ "path" : "a.go" }`,
+	}
+	want := callKey("read_file", json.RawMessage(same[0]))
+	for _, args := range same[1:] {
+		if got := callKey("read_file", json.RawMessage(args)); got != want {
+			t.Errorf("callKey(%s) = %q, want %q — same call, different spelling", args, got, want)
+		}
+	}
+}
+
+func TestCallKey_IgnoresKeyOrder(t *testing.T) {
+	a := callKey("read_file", json.RawMessage(`{"path":"a.go","max_bytes":10}`))
+	b := callKey("read_file", json.RawMessage(`{"max_bytes":10,"path":"a.go"}`))
+	if a != b {
+		t.Errorf("key order changed the signature:\n %q\n %q", a, b)
+	}
+}
+
+// Genuinely different calls must stay different, including a field that
+// is present in one and absent in the other — metadata_only:true really
+// is a different request.
+func TestCallKey_KeepsRealDifferences(t *testing.T) {
+	base := callKey("read_file", json.RawMessage(`{"path":"a.go"}`))
+	for _, other := range []string{
+		`{"path":"b.go"}`,
+		`{"path":"a.go","metadata_only":true}`,
+	} {
+		if got := callKey("read_file", json.RawMessage(other)); got == base {
+			t.Errorf("callKey(%s) collapsed into the base key %q", other, base)
+		}
+	}
+	if callKey("read_file", json.RawMessage(`{"path":"a.go"}`)) ==
+		callKey("list_files", json.RawMessage(`{"path":"a.go"}`)) {
+		t.Error("different tools with identical arguments share a key")
+	}
+}
+
+// Malformed arguments fall back to raw bytes rather than collapsing.
+func TestCallKey_MalformedArgumentsDoNotCollapse(t *testing.T) {
+	a := callKey("run_shell", json.RawMessage(`{"command": "go test`))
+	b := callKey("run_shell", json.RawMessage(`not json at all`))
+	if a == b {
+		t.Error("two different malformed argument blobs share a key")
+	}
 }

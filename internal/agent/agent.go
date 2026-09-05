@@ -151,8 +151,6 @@ type RunReport struct {
 	LastPromptTokens int
 }
 
-// Report returns measured facts about the most recent Run/Resume,
-// including a partially filled report for a run that errored mid-way.
 // ToolNames returns the names of the tools this agent can call, sorted.
 // What an agent is allowed to do is a property worth asserting on rather
 // than assuming: a harness that builds its agent by hand can silently end
@@ -164,6 +162,8 @@ func (a *Agent) ToolNames() []string {
 	return a.cfg.Tools.Names()
 }
 
+// Report returns measured facts about the most recent Run/Resume,
+// including a partially filled report for a run that errored mid-way.
 func (a *Agent) Report() RunReport {
 	return a.report
 }
@@ -281,12 +281,12 @@ func (a *Agent) saveState(history []llm.Message) {
 }
 
 type runState struct {
-	stuckSteps, exploratorySteps, mutatingSucceeded, warnedThreshold, lastPromptTokens int
-	consecutiveSameToolCount                                                          int
+	stuckSteps, exploratorySteps, mutatingSucceeded, warnedThreshold, lastPromptTokens       int
+	consecutiveSameToolCount                                                                 int
 	verifiedOnce, searchFatigueWarned, compactedOnce, blockFinishDueToVerify, toolLoopWarned bool
-	emptyFinishRetried                                                                 bool
-	lastSignature, verifyFailedOutput, lastSingleTool string
-	mutatedPaths                                      []string
+	emptyFinishRetried                                                                       bool
+	lastSignature, verifyFailedOutput, lastSingleTool                                        string
+	mutatedPaths                                                                             []string
 
 	// zeroWriteFinishes counts how many times the model has tried to end
 	// the run having written nothing, while VerifyOnZeroWrites says the
@@ -511,7 +511,7 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 			if !a.cfg.Tools.IdempotentOf(call.Name) {
 				continue
 			}
-			sig := call.Name + ":" + string(call.Arguments)
+			sig := callKey(call.Name, call.Arguments)
 			if prev, seen := st.idempotentSeen[sig]; seen {
 				skipped[i] = true
 				results[i] = callResult{err: fmt.Errorf(
@@ -572,7 +572,7 @@ func (a *Agent) run(ctx context.Context, history []llm.Message) (string, error) 
 					if st.idempotentSeen == nil {
 						st.idempotentSeen = make(map[string]int)
 					}
-					st.idempotentSeen[call.Name+":"+string(call.Arguments)] = step
+					st.idempotentSeen[callKey(call.Name, call.Arguments)] = step
 				}
 				if containsStr(a.cfg.MutatingTools, call.Name) {
 					st.mutatingSucceeded++
@@ -922,8 +922,31 @@ func containsStr(list []string, s string) bool {
 func callSignature(calls []llm.ToolCall) string {
 	parts := make([]string, len(calls))
 	for i, c := range calls {
-		parts[i] = c.Name + ":" + string(c.Arguments)
+		parts[i] = callKey(c.Name, c.Arguments)
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "|")
+}
+
+// callKey identifies one tool call for repeat detection, canonicalizing
+// the arguments so that spelling differences don't read as different
+// calls. A model re-reading one file emits {"path":"x"} one step and
+// {"path": "x", "metadata_only": false} the next; on raw bytes those are
+// two distinct keys, so the repeat guard never fires and the same file
+// comes back again. Round-tripping through a map sorts the keys and
+// drops the whitespace.
+//
+// Arguments that aren't a JSON object (malformed output, a bare string)
+// fall back to the raw bytes: better a key that is too specific than one
+// that collapses two genuinely different calls into one.
+func callKey(name string, args json.RawMessage) string {
+	var obj map[string]any
+	if err := json.Unmarshal(args, &obj); err != nil {
+		return name + ":" + string(args)
+	}
+	canonical, err := json.Marshal(obj)
+	if err != nil {
+		return name + ":" + string(args)
+	}
+	return name + ":" + string(canonical)
 }
