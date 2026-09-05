@@ -15,7 +15,21 @@ import (
 	"github.com/keshon/tars/internal/workspace"
 )
 
-const readMaxBytes = 128 * 1024 // cap one read_file result — mirrors grep_files safety nets
+// readMaxBytes caps one read_file result. Sized against real source
+// files rather than a round number: the largest file in this repo is
+// under 40KB, so 48KB reads any of them whole.
+//
+// The ceiling matters more than the headroom. Bytes are a poor proxy for
+// context cost — 128KB of source is roughly 32k tokens, the same 128KB of
+// base64 is 57k — and a local model often has 32-64k of context in total.
+// A single tool result that can consume most of the window defeats
+// everything else the loop does to protect it. Live: a read of a 205KB
+// fixture returned the old 128KB cap, took the prompt from 3.4k to 57k
+// tokens in one step, and the run hit its wall-clock limit at 900s.
+//
+// A truncated read still reports the file's true size, so the model can
+// see what it did not get.
+const readMaxBytes = 48 * 1024
 
 type ReadFile struct{ WS *workspace.Workspace }
 

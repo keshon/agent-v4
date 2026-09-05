@@ -135,3 +135,34 @@ func TestReadFile_MaxBytesPositive_CapsContent(t *testing.T) {
 		t.Fatalf("max_bytes=5 should cap at 5 bytes, got: %q", out)
 	}
 }
+
+// A single tool result must not be able to consume most of a small
+// context window. Live (2026-09-05): reading a 205KB fixture returned
+// the then-current 128KB cap, which took the prompt from 3.4k to 57k
+// tokens — 87% of a 65k window — in one step, and the run timed out.
+func TestReadFile_CapIsSmallEnoughForASmallContext(t *testing.T) {
+	dir := t.TempDir()
+	big := strings.Repeat("abcdefgh", 40*1024) // 320KB
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(big), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	ws, err := workspace.New(dir)
+	if err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+
+	args, _ := json.Marshal(map[string]string{"path": "big.txt"})
+	out, err := (ReadFile{WS: ws}).Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(out) > readMaxBytes+1024 { // body plus the FILE header
+		t.Errorf("read returned %d bytes, cap is %d", len(out), readMaxBytes)
+	}
+	if !strings.Contains(out, "truncated: true") {
+		t.Error("a truncated read must say so")
+	}
+	if !strings.Contains(out, "size: 327680") {
+		t.Error("a truncated read must still report the file's real size")
+	}
+}
