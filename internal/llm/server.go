@@ -56,6 +56,13 @@ type Server struct {
 // a score measured under unknown sampling cannot be compared to the next
 // one. Values here are deliberate and measurable, not inherited.
 //
+// top_p and top_k are here for a sharper version of that reason. They
+// were omitted, so each backend applied its own — and koboldcpp and
+// llama-server do not agree on them. A comparison between the two
+// backends would have been partly a comparison of their sampler presets,
+// which is exactly the confound the temperature default was added to
+// remove.
+//
 // DRY is off by default, and that is a measured decision rather than a
 // preference. It was switched on to stop a collapse — a run whose context
 // filled with high-entropy base64 degenerated into one token repeated for
@@ -70,6 +77,8 @@ type Server struct {
 // KoboldClient.DRY re-enables it for anyone who wants to re-test.
 const (
 	defaultTemperature = 0.4
+	defaultTopP        = 0.95
+	defaultTopK        = 40
 	defaultRepPen      = 1.05
 	defaultRepPenRange = 1024
 	defaultDRYMult     = 0.8
@@ -127,6 +136,8 @@ type wireRequest struct {
 	Grammar     string        `json:"grammar,omitempty"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature,omitempty"`
+	TopP        float64       `json:"top_p,omitempty"`
+	TopK        int           `json:"top_k,omitempty"`
 
 	// Repetition controls. Both backends pass unknown fields through to
 	// the sampler, the same route the grammar field takes, and each
@@ -188,6 +199,8 @@ func (c *Server) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error
 		Grammar:     grammar,
 		MaxTokens:   req.MaxTokens,
 		Temperature: temperature,
+		TopP:        defaultTopP,
+		TopK:        defaultTopK,
 	}
 	c.dialect.applySampling(&wreq, c.DRY)
 

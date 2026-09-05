@@ -123,3 +123,26 @@ func TestServer_RequestGrammarWinsOverTheBackendDefault(t *testing.T) {
 		t.Errorf("per-request grammar was overridden: %s", captured)
 	}
 }
+
+// Omitting top_p and top_k left each backend applying its own, and the
+// two do not agree — a backend comparison would have been partly a
+// comparison of sampler presets.
+func TestChat_SendsTopPAndTopKOnBothBackends(t *testing.T) {
+	for _, newClient := range []func(string, string) *Server{NewKoboldClient, NewLlamaClient} {
+		var captured []byte
+		srv := captureServer(t, &captured)
+
+		c := newClient(srv.URL, "local")
+		if _, err := c.Chat(context.Background(), ChatRequest{
+			Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		}); err != nil {
+			t.Fatalf("Chat: %v", err)
+		}
+		for _, field := range []string{`"top_p"`, `"top_k"`} {
+			if !strings.Contains(string(captured), field) {
+				t.Errorf("%s missing for %s: %s", field, c.Backend(), captured)
+			}
+		}
+		srv.Close()
+	}
+}
