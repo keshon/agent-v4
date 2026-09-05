@@ -42,6 +42,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -78,6 +79,12 @@ type Probe struct {
 	//   mission the planner pipeline. Expensive; run when mission code
 	//           changed or at a checkpoint.
 	Tier string `json:"tier"`
+
+	// Exclusive means this probe must not run alongside anything else —
+	// it binds a fixed port or otherwise owns a machine-wide resource, so
+	// a second copy would fail for reasons that say nothing about the
+	// agent.
+	Exclusive bool `json:"exclusive,omitempty"`
 
 	// Seed is a directory copied in as the starting workspace, relative to
 	// the repo root. Empty means start from an empty directory.
@@ -217,6 +224,9 @@ func main() {
 	model := flag.String("model", "local", "model name (often ignored by local servers)")
 	dir := flag.String("probes", "eval/probes", "directory of probe .json files")
 	only := flag.String("only", "", "run only probes whose name contains this substring")
+	jobsN := flag.Int("jobs", 1, "how many probes to run at once. Both backends batch concurrent "+
+		"requests (koboldcpp --parallelrequests, llama-server --parallel) and neither helps unless "+
+		"the client sends them; raising this past what the server was started with just queues")
 	tier := flag.String("tier", "", "run only probes in this tier: smoke (fast canary), signal "+
 		"(where the information is), mission (the planner pipeline). Empty runs every tier")
 	runs := flag.Int("runs", 1, "runs per probe — a weak model is stochastic, so one pass "+
@@ -294,34 +304,87 @@ func main() {
 	}
 	fmt.Printf("backend %s (%s)\nmodel   %s\ncontext %d\n%d probes x %d runs\n\n",
 		*backend, probe.Backend(), backendModel, contextLimit, len(probes), *runs)
-	writeMeta(runDir, probe.Backend(), *backend, backendModel, contextLimit)
+	writeMeta(runDir, probe.Backend(), *backend, backendModel, contextLimit, *jobsN)
 
-	var all []Result
+	// Every (probe, run) pair is one job. Both backends batch concurrent
+	// requests — koboldcpp with --parallelrequests, llama-server with
+	// --parallel — and neither helps while the client sends one request
+	// at a time, which is what this loop used to do.
+	type job struct {
+		probe Probe
+		run   int
+	}
+	var jobs, exclusive []job
 	for _, p := range probes {
 		for run := 1; run <= *runs; run++ {
-			r := runOnce(ctx, p, run, runDir, *backendKind, *backend, *model, contextLimit, *maxTokens, *dry_)
-			all = append(all, r)
-
-			line, _ := json.Marshal(r)
-			fmt.Fprintln(results, string(line))
-
-			status := "PASS"
-			switch {
-			case r.Errored:
-				status = "ERR "
-			case !r.Passed:
-				status = "FAIL"
+			if p.Exclusive {
+				exclusive = append(exclusive, job{p, run})
+			} else {
+				jobs = append(jobs, job{p, run})
 			}
-			fmt.Printf("  %s  %-22s run %d  %6.1fs  %2d steps  ctx %2d%%",
-				status, p.Name, run, r.Seconds, r.Steps, r.PeakContextPct)
-			if len(r.Failures) > 0 {
-				fmt.Printf("  %s", r.Failures[0])
-			} else if r.RunError != "" {
-				fmt.Printf("  (%s)", r.RunError)
-			}
-			fmt.Println()
 		}
 	}
+
+	var (
+		mu  sync.Mutex
+		all []Result
+	)
+	record := func(r Result) {
+		mu.Lock()
+		defer mu.Unlock()
+		all = append(all, r)
+
+		line, _ := json.Marshal(r)
+		fmt.Fprintln(results, string(line))
+
+		status := "PASS"
+		switch {
+		case r.Errored:
+			status = "ERR "
+		case !r.Passed:
+			status = "FAIL"
+		}
+		fmt.Printf("  %s  %-22s run %d  %6.1fs  %2d steps  ctx %2d%%",
+			status, r.Probe, r.Run, r.Seconds, r.Steps, r.PeakContextPct)
+		if len(r.Failures) > 0 {
+			fmt.Printf("  %s", r.Failures[0])
+		} else if r.RunError != "" {
+			fmt.Printf("  (%s)", r.RunError)
+		}
+		fmt.Println()
+	}
+
+	run1 := func(j job) {
+		record(runOnce(ctx, j.probe, j.run, runDir, *backendKind, *backend, *model,
+			contextLimit, *maxTokens, *dry_))
+	}
+
+	// Exclusive probes first and alone: one that binds a fixed port
+	// cannot share the machine with another copy of itself.
+	for _, j := range exclusive {
+		run1(j)
+	}
+
+	sem := make(chan struct{}, max(*jobsN, 1))
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		wg.Add(1)
+		go func(j job) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			run1(j)
+		}(j)
+	}
+	wg.Wait()
+
+	// Concurrent completion order is not run order.
+	sort.Slice(all, func(i, k int) bool {
+		if all[i].Probe != all[k].Probe {
+			return all[i].Probe < all[k].Probe
+		}
+		return all[i].Run < all[k].Run
+	})
 
 	fmt.Printf("\n%s\n\nresults: %s\n", summarize(all), resultsPath)
 }
@@ -677,13 +740,19 @@ func summarize(all []Result) string {
 }
 
 // writeMeta records what produced these numbers, next to the numbers.
-func writeMeta(runDir, kind, backend, model string, contextLimit int) {
+func writeMeta(runDir, kind, backend, model string, contextLimit, jobs int) {
 	meta := map[string]any{
 		"backend_kind":  kind,
 		"backend":       backend,
 		"model":         model,
 		"context_limit": contextLimit,
-		"started":       time.Now().Format(time.RFC3339),
+		// Recorded because it changes what the per-probe seconds mean: at
+		// more than one job those are wall time including queueing behind
+		// other probes, not the work the probe did. Comparing a
+		// concurrent run's timings against a sequential one measures the
+		// scheduler.
+		"jobs":    jobs,
+		"started": time.Now().Format(time.RFC3339),
 	}
 	data, _ := json.MarshalIndent(meta, "", "  ")
 	_ = os.WriteFile(filepath.Join(runDir, "meta.json"), data, 0o644)

@@ -21,5 +21,6 @@
       "args_regex": "(?i)\"command\" *: *\"[^\"]*(go run|http.server|npm run|node )",
       "why": "the long-process trap: this blocks, times out, and looks like a model failure"
     }
-  ]
+  ],
+  "exclusive": true
 }
