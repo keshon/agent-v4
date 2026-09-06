@@ -281,6 +281,9 @@ func parseAndValidate(raw, task string, existing map[string]bool) (subtasks []Su
 			errs = append(errs, msg)
 		}
 
+		if note := repairUnrunnableCheck(s); note != "" {
+			warnings = append(warnings, note)
+		}
 		errs = append(errs, validateCheck(s, existing)...)
 
 		if s.Check.Type != "" && s.Check.Type != "none" {
@@ -619,6 +622,63 @@ func mutatingShellCheck(cmd string) string {
 		"cp", "copy", "tee", "truncate":
 		return "runs a command that changes the workspace — a check must " +
 			"observe the result, not produce it"
+	}
+	return ""
+}
+
+// repairUnrunnableCheck downgrades a shell check that cannot run on this
+// host, instead of letting it sink the plan that carries it.
+//
+// The plan and the check are separate judgements, and only one of them is
+// the work. Live: a replan correctly diagnosed a save/load bug and
+// proposed exactly the right fix - store_var and get_var instead of JSON,
+// to stop integers coming back as floats - and attached the check
+// `grep 'store_var' Save.gd`. This host has no grep. The whole plan was
+// rejected, the correct fix was discarded, and the mission failed with
+// the work never attempted.
+//
+// Replacing the check costs little: DerivedChecks already adds
+// file_exists for every files_hint path, so the subtask stays verified
+// against what it declared it would produce. A check that names a path
+// keeps that path; one that names nothing degrades to none and leans on
+// the derived checks and the final verify.
+//
+// Returns a warning describing the substitution, so a human reading the
+// plan sees the check they are actually getting.
+func repairUnrunnableCheck(s *Subtask) string {
+	if s.Check.Type != "shell" {
+		return ""
+	}
+	cmd := strings.TrimSpace(strings.ToLower(s.Check.Cmd))
+	if cmd == "" {
+		return "" // validateCheck reports an empty cmd; not this rule's business
+	}
+	reason := missingCommand(cmd)
+	if reason == "" {
+		return ""
+	}
+	old := s.Check.Cmd
+	if path := firstCheckablePath(s); path != "" {
+		s.Check = Check{Type: "file_exists", Path: path}
+		return fmt.Sprintf("%s: shell check %q %s - replaced with file_exists on %s",
+			s.ID, old, reason, path)
+	}
+	s.Check = Check{Type: "none"}
+	return fmt.Sprintf("%s: shell check %q %s - dropped; the subtask now rests on "+
+		"its derived checks and the final verification", s.ID, old, reason)
+}
+
+// firstCheckablePath picks the path a downgraded check should watch: the
+// one the check already named if it named one, else the subtask's first
+// declared output.
+func firstCheckablePath(s *Subtask) string {
+	if p := strings.TrimSpace(s.Check.Path); p != "" {
+		return p
+	}
+	for _, p := range s.FilesHint {
+		if p = strings.TrimSpace(p); p != "" {
+			return p
+		}
 	}
 	return ""
 }
